@@ -1,0 +1,120 @@
+//! LAN-IP autodetection & ranking (SPEC §2.3, §12.1).
+
+use std::net::Ipv4Addr;
+
+use crate::config;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IfKind {
+    Lan,
+    Vpn,
+    Virtual,
+}
+
+impl IfKind {
+    pub fn tag(self) -> &'static str {
+        match self {
+            IfKind::Lan => "LAN",
+            IfKind::Vpn => "VPN",
+            IfKind::Virtual => "virtual",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Candidate {
+    pub name: String,
+    pub ip: Ipv4Addr,
+    pub kind: IfKind,
+    pub score: i32,
+    pub recommended: bool,
+}
+
+/// Enumerate private IPv4 candidates, ranked best-first. The recommended one is
+/// marked and placed at the front.
+pub fn candidates() -> Vec<Candidate> {
+    let mut list: Vec<Candidate> = Vec::new();
+
+    if let Ok(ifaces) = local_ip_address::list_afinet_netifas() {
+        for (name, ip) in ifaces {
+            let std::net::IpAddr::V4(v4) = ip else { continue };
+            if !is_private(&v4) || v4.is_loopback() {
+                continue;
+            }
+            let kind = classify(&name, &v4);
+            let score = score(&name, &v4, kind);
+            list.push(Candidate {
+                name,
+                ip: v4,
+                kind,
+                score,
+                recommended: false,
+            });
+        }
+    }
+
+    // Honor a hard override / constant if it matches a discovered IP, or inject it.
+    if let Some(forced) = config::PREFERRED_IP.and_then(|s| s.parse::<Ipv4Addr>().ok()) {
+        if let Some(c) = list.iter_mut().find(|c| c.ip == forced) {
+            c.score += 10_000;
+        } else {
+            list.push(Candidate {
+                name: "(override)".into(),
+                ip: forced,
+                kind: IfKind::Lan,
+                score: 10_000,
+                recommended: false,
+            });
+        }
+    }
+
+    list.sort_by(|a, b| b.score.cmp(&a.score).then(a.ip.octets().cmp(&b.ip.octets())));
+    if let Some(first) = list.first_mut() {
+        first.recommended = true;
+    }
+    list
+}
+
+fn is_private(ip: &Ipv4Addr) -> bool {
+    ip.is_private()
+}
+
+fn classify(name: &str, ip: &Ipv4Addr) -> IfKind {
+    let n = name.to_lowercase();
+    let virtual_hint = ["virtualbox", "vmware", "vethernet", "hyper-v", "loopback", "vbox", "default switch", "docker"];
+    let vpn_hint = ["vpn", "wireguard", "wg", "tun", "tap", "openvpn", "proton", "tailscale", "zerotier"];
+
+    // VirtualBox host-only network (SPEC §2.3) is virtual.
+    let o = ip.octets();
+    if o[0] == 192 && o[1] == 168 && o[2] == 56 {
+        return IfKind::Virtual;
+    }
+    if vpn_hint.iter().any(|h| n.contains(h)) {
+        return IfKind::Vpn;
+    }
+    if virtual_hint.iter().any(|h| n.contains(h)) {
+        return IfKind::Virtual;
+    }
+    IfKind::Lan
+}
+
+/// Higher is better. 192.168.* > 172.* > 10.*; VirtualBox host-only penalized;
+/// VPN/virtual interfaces penalized (SPEC §2.3).
+fn score(_name: &str, ip: &Ipv4Addr, kind: IfKind) -> i32 {
+    let o = ip.octets();
+    let mut s = match (o[0], o[1]) {
+        (192, 168) => 300,
+        (172, _) => 200,
+        (10, _) => 100,
+        _ => 50,
+    };
+    if o[0] == 192 && o[1] == 168 && o[2] == 56 {
+        s -= 500; // VirtualBox host-only
+    }
+    match kind {
+        IfKind::Lan => {}
+        IfKind::Vpn => s -= 400,
+        IfKind::Virtual => s -= 350,
+    }
+    s
+}

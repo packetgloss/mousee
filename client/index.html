@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<title>mousee</title>
+<style>
+  /* ====================== CLIENT TUNING (SPEC §8) ====================== */
+  /* JS reads these via the CFG object below; CSS is just presentation. */
+  :root {
+    --bg: #0e1116;
+    --panel: #1a1f29;
+    --panel2: #232a37;
+    --accent: #4f8cff;
+    --accent2: #2e6bff;
+    --text: #e6edf3;
+    --muted: #8b97a7;
+    --good: #3fb950;
+    --bad: #f85149;
+    --warn: #d29922;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; height: 100%; width: 100%;
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    overflow: hidden; overscroll-behavior: none; touch-action: none;
+    -webkit-user-select: none; user-select: none;
+  }
+  .screen { position: fixed; inset: 0; display: none; flex-direction: column;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+  .screen.active { display: flex; }
+  .pad { padding: 24px; }
+  h1 { font-size: 28px; margin: 0 0 4px; }
+  h2 { font-size: 20px; margin: 0 0 16px; font-weight: 600; }
+  .sub { color: var(--muted); font-size: 14px; margin: 0 0 24px; }
+  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+  input[type=text] {
+    width: 100%; padding: 14px 16px; font-size: 18px; border-radius: 12px;
+    border: 1px solid var(--panel2); background: var(--panel); color: var(--text);
+  }
+  button {
+    font-family: inherit; color: var(--text); border: none; cursor: pointer;
+  }
+  .btn {
+    display: block; width: 100%; padding: 18px; font-size: 18px; font-weight: 600;
+    border-radius: 14px; background: var(--accent); color: #fff; margin-top: 16px;
+  }
+  .btn:active { background: var(--accent2); }
+  .btn.secondary { background: var(--panel2); color: var(--text); }
+  .card {
+    width: 100%; padding: 20px; border-radius: 16px; background: var(--panel);
+    border: 1px solid var(--panel2); margin-top: 14px; text-align: left;
+  }
+  .card .t { font-size: 18px; font-weight: 700; }
+  .card .d { font-size: 13px; color: var(--muted); margin-top: 4px; }
+  .card.reco { border-color: var(--accent); }
+  .badge { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 999px;
+    background: var(--accent); color:#fff; margin-left: 8px; vertical-align: middle; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .toggle { position: relative; width: 52px; height: 30px; border-radius: 999px;
+    background: var(--panel2); transition: background .15s; flex: 0 0 auto; }
+  .toggle.on { background: var(--good); }
+  .toggle::after { content:""; position:absolute; top:3px; left:3px; width:24px; height:24px;
+    border-radius:50%; background:#fff; transition: transform .15s; }
+  .toggle.on::after { transform: translateX(22px); }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  .status { position: fixed; top: 10px; right: 12px; font-size: 12px; color: var(--muted);
+    display: flex; align-items: center; gap: 6px; z-index: 50; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--bad); }
+  .dot.ok { background: var(--good); }
+
+  /* calibration grid */
+  .calib-grid { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr 1fr;
+    gap: 12px; flex: 1; }
+  .corner { border-radius: 14px; background: var(--panel); border: 2px solid var(--panel2);
+    font-size: 15px; font-weight: 600; display: flex; align-items: center; justify-content: center; }
+  .corner.done { background: #14301c; border-color: var(--good); color: var(--good); }
+  .corner.center { grid-column: 1 / span 2; }
+  .readout { font-variant-numeric: tabular-nums; font-size: 13px; color: var(--muted);
+    text-align: center; margin: 10px 0; }
+  #calibCanvas { display: block; margin: 0 auto; background: var(--panel);
+    border: 1px solid var(--panel2); border-radius: 12px; }
+
+  /* control screen */
+  #control { background: #0b0e13; }
+  .halves { position: absolute; inset: 0; display: flex; }
+  .half { flex: 1; display: flex; align-items: center; justify-content: center;
+    font-size: 16px; color: #2f3946; font-weight: 700; letter-spacing: 1px; }
+  .half + .half { border-left: 1px dashed #1c2430; }
+  .hint { position: absolute; left: 0; right: 0; bottom: 0; padding: 14px 18px calc(14px + env(safe-area-inset-bottom));
+    background: linear-gradient(transparent, #0b0e13 40%); font-size: 12px; color: var(--muted);
+    text-align: center; line-height: 1.5; }
+  .scrollflag { position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
+    font-size: 12px; color: var(--accent); opacity: 0; transition: opacity .1s; }
+  .scrollflag.on { opacity: 1; }
+  .topbar { display:flex; align-items:center; gap:10px; }
+  .iconbtn { background: var(--panel2); border-radius: 10px; padding: 8px 12px; font-size: 13px; }
+</style>
+</head>
+<body>
+
+<div class="status"><span id="statusDot" class="dot"></span><span id="statusText">disconnected</span></div>
+
+<!-- 1. SETUP ------------------------------------------------------------- -->
+<section id="setup" class="screen active pad">
+  <h1>mousee</h1>
+  <p class="sub">Point your phone like a laser pointer to move the PC cursor.</p>
+  <label for="ipInput">Server address</label>
+  <input id="ipInput" type="text" inputmode="decimal" autocomplete="off" autocapitalize="off" spellcheck="false" />
+  <button id="connectBtn" class="btn">Connect</button>
+  <p id="setupErr" class="sub" style="color:var(--warn); margin-top:16px;"></p>
+  <p class="sub" style="margin-top:auto;">On iPhone you must accept the certificate and grant motion access when prompted.</p>
+</section>
+
+<!-- 2. MODE -------------------------------------------------------------- -->
+<section id="mode" class="screen pad">
+  <h1>Choose mode</h1>
+  <p class="sub">Same gesture in both modes — aim the phone.</p>
+
+  <button class="card reco" id="modeRelative">
+    <div class="t">Air Mouse / laser pointer <span class="badge">recommended</span></div>
+    <div class="d">No calibration. Move by aiming — best for everyday control.</div>
+  </button>
+
+  <button class="card" id="modeAbsolute">
+    <div class="t">Absolute</div>
+    <div class="d">Maps phone aim directly to the screen. Needs a quick 4-corner calibration.</div>
+  </button>
+
+  <div class="card">
+    <div class="row">
+      <div>
+        <div class="t" style="font-size:15px;">Dynamic anti-jitter</div>
+        <div class="d">Smooths hand tremor automatically.</div>
+      </div>
+      <div id="ajToggle" class="toggle"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <label for="smoothing">Smoothing</label>
+    <input id="smoothing" type="range" min="0.05" max="1" step="0.05" value="0.35" />
+  </div>
+</section>
+
+<!-- 3. CALIBRATION ------------------------------------------------------- -->
+<section id="calib" class="screen pad">
+  <div class="topbar">
+    <h2 style="margin:0; flex:1;">Calibration</h2>
+    <button id="calibReset" class="iconbtn">Reset</button>
+  </div>
+  <p class="sub" style="margin:8px 0 12px;">Aim at each corner of your work area and tap it.</p>
+  <div class="readout" id="calibReadout">β — · α —</div>
+  <canvas id="calibCanvas" width="220" height="132"></canvas>
+  <div class="calib-grid" style="margin-top:12px;">
+    <button class="corner" data-c="TL">Top-Left</button>
+    <button class="corner" data-c="TR">Top-Right</button>
+    <button class="corner center" data-c="CENTER">Center (optional)</button>
+    <button class="corner" data-c="BL">Bottom-Left</button>
+    <button class="corner" data-c="BR">Bottom-Right</button>
+  </div>
+</section>
+
+<!-- 4. CONTROL ----------------------------------------------------------- -->
+<section id="control" class="screen">
+  <div class="halves">
+    <div class="half">L · click</div>
+    <div class="half">R · click</div>
+  </div>
+  <div id="scrollFlag" class="scrollflag">scrolling…</div>
+  <div class="hint">
+    Tap = click (L/R) · Hold then aim = drag/select · Swipe = scroll<br/>
+    Aim the phone to move the cursor.
+  </div>
+</section>
+
+<script>
+"use strict";
+// ======================= CLIENT TUNING (SPEC §8) =======================
+const CFG = {
+  DEFAULT_PORT: 8081,
+  HOLD_MS: 180,        // tap vs hold threshold
+  MOVE_THRESH_PX: 8,   // hold vs swipe threshold
+  SCROLL_STEP_PX: 18,  // finger px per one wheel tick
+};
+
+// ----------------------------- state ---------------------------------
+let ws = null;
+let connected = false;
+let screen = "setup";
+const orient = { alpha: null, beta: null, gamma: null };
+let accel = null; // [x,y,z]
+const calibrated = {}; // corner -> {beta, alpha}
+
+// --------------------------- utilities -------------------------------
+const $ = (id) => document.getElementById(id);
+function show(name) {
+  document.querySelectorAll(".screen").forEach((s) => s.classList.remove("active"));
+  $(name).classList.add("active");
+  screen = name;
+}
+function setStatus(ok, text) {
+  $("statusDot").classList.toggle("ok", ok);
+  $("statusText").textContent = text;
+}
+function send(obj) {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+}
+
+// ------------------------- WebSocket conn ----------------------------
+function wsUrl() {
+  const ip = $("ipInput").value.trim() || location.hostname;
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const port = location.port || CFG.DEFAULT_PORT;
+  return `${proto}//${ip}:${port}`;
+}
+function connect() {
+  try {
+    ws = new WebSocket(wsUrl());
+  } catch (e) {
+    $("setupErr").textContent = "Bad address: " + e.message;
+    return;
+  }
+  setStatus(false, "connecting…");
+  ws.onopen = () => {
+    connected = true;
+    setStatus(true, "connected");
+    show("mode");
+  };
+  ws.onclose = () => {
+    connected = false;
+    setStatus(false, "disconnected");
+    if (screen !== "setup") show("setup");
+  };
+  ws.onerror = () => {
+    $("setupErr").textContent = "Connection failed. Check IP, port and that you accepted the certificate.";
+    setStatus(false, "error");
+  };
+}
+
+// ------------------- sensor permission (iOS gesture) -----------------
+async function requestSensors() {
+  const reqs = [];
+  if (typeof DeviceOrientationEvent !== "undefined" &&
+      typeof DeviceOrientationEvent.requestPermission === "function") {
+    reqs.push(DeviceOrientationEvent.requestPermission().catch(() => "denied"));
+  }
+  if (typeof DeviceMotionEvent !== "undefined" &&
+      typeof DeviceMotionEvent.requestPermission === "function") {
+    reqs.push(DeviceMotionEvent.requestPermission().catch(() => "denied"));
+  }
+  // Must be triggered synchronously from the tap; awaiting the result is fine.
+  await Promise.all(reqs);
+  attachSensors();
+}
+function attachSensors() {
+  window.addEventListener("deviceorientation", (e) => {
+    if (e.alpha != null) orient.alpha = e.alpha;
+    if (e.beta != null) orient.beta = e.beta;
+    if (e.gamma != null) orient.gamma = e.gamma;
+  }, true);
+  window.addEventListener("devicemotion", (e) => {
+    const g = e.accelerationIncludingGravity;
+    if (g && g.x != null) accel = [g.x, g.y, g.z];
+  }, true);
+}
+
+// --------------------------- setup screen ----------------------------
+$("ipInput").value = location.hostname;
+$("connectBtn").addEventListener("click", async () => {
+  $("setupErr").textContent = "";
+  try {
+    await requestSensors(); // synchronously initiated inside the tap (iOS)
+  } catch (e) { /* ignore; some browsers grant without prompt */ }
+  connect();
+});
+
+// --------------------------- mode screen -----------------------------
+$("modeRelative").addEventListener("click", () => {
+  send({ t: "mode", mode: "relative" });
+  startControl();
+});
+$("modeAbsolute").addEventListener("click", () => {
+  send({ t: "mode", mode: "absolute" });
+  send({ t: "reset_calib" });
+  for (const k in calibrated) delete calibrated[k];
+  refreshCorners();
+  show("calib");
+});
+const ajToggle = $("ajToggle");
+ajToggle.addEventListener("click", () => {
+  const on = !ajToggle.classList.contains("on");
+  ajToggle.classList.toggle("on", on);
+  send({ t: "anti_jitter", on });
+});
+$("smoothing").addEventListener("input", (e) => {
+  send({ t: "smoothing", value: parseFloat(e.target.value) });
+});
+
+// ------------------------ calibration screen -------------------------
+const CORNERS = ["TL", "TR", "BL", "BR"]; // CENTER is optional / unused (SPEC §5.1)
+function refreshCorners() {
+  document.querySelectorAll(".corner").forEach((b) => {
+    b.classList.toggle("done", !!calibrated[b.dataset.c]);
+  });
+}
+document.querySelectorAll(".corner").forEach((b) => {
+  b.addEventListener("click", () => {
+    if (orient.beta == null || orient.alpha == null) return;
+    const c = b.dataset.c;
+    calibrated[c] = { beta: orient.beta, alpha: orient.alpha };
+    send({ t: "calib", point: c, beta: orient.beta, alpha: orient.alpha });
+    refreshCorners();
+    if (CORNERS.every((k) => calibrated[k])) {
+      setTimeout(startControl, 250); // all 4 corners -> auto-enter control
+    }
+  });
+});
+$("calibReset").addEventListener("click", () => {
+  for (const k in calibrated) delete calibrated[k];
+  send({ t: "reset_calib" });
+  refreshCorners();
+});
+
+// live calibration readout + visualizer
+const cc = $("calibCanvas").getContext("2d");
+function drawCalib() {
+  if (screen === "calib") {
+    const b = orient.beta, a = orient.alpha;
+    $("calibReadout").textContent =
+      `β ${b == null ? "—" : b.toFixed(1)} · α ${a == null ? "—" : a.toFixed(1)}`;
+
+    const W = cc.canvas.width, H = cc.canvas.height;
+    cc.clearRect(0, 0, W, H);
+    cc.strokeStyle = "#2e3744";
+    cc.strokeRect(8, 8, W - 16, H - 16);
+
+    // If we have all 4 corners, plot the live point inside the calibrated box.
+    if (CORNERS.every((k) => calibrated[k]) && b != null && a != null) {
+      const minB = (calibrated.TL.beta + calibrated.TR.beta) / 2;
+      const maxB = (calibrated.BL.beta + calibrated.BR.beta) / 2;
+      let aL = (calibrated.TL.alpha + calibrated.BL.alpha) / 2;
+      let aR = (calibrated.TR.alpha + calibrated.BR.alpha) / 2;
+      if (aR - aL > 180) aR -= 360; else if (aR - aL < -180) aR += 360;
+      const center = (aL + aR) / 2;
+      let av = a; while (av - center > 180) av -= 360; while (av - center < -180) av += 360;
+      let fx = (av - aL) / (aR - aL);
+      let fy = (b - minB) / (maxB - minB);
+      fx = Math.max(0, Math.min(1, fx));
+      fy = Math.max(0, Math.min(1, fy));
+      const px = 8 + fx * (W - 16);
+      const py = 8 + fy * (H - 16);
+      cc.fillStyle = "#4f8cff";
+      cc.beginPath(); cc.arc(px, py, 6, 0, Math.PI * 2); cc.fill();
+    } else {
+      cc.fillStyle = "#2e3744";
+      cc.font = "12px sans-serif"; cc.textAlign = "center";
+      cc.fillText("collect 4 corners", W / 2, H / 2);
+    }
+  }
+  requestAnimationFrame(drawCalib);
+}
+requestAnimationFrame(drawCalib);
+
+// --------------------------- control screen --------------------------
+function startControl() {
+  show("control");
+}
+
+// gesture state
+let touch = null; // {id, startX, startY, half, state, lastY, scrollAcc, holdTimer}
+let suppressMove = false;
+
+function halfOf(x) { return x < window.innerWidth / 2 ? "left" : "right"; }
+
+const control = $("control");
+control.addEventListener("touchstart", (e) => {
+  if (touch) return; // single pointer only
+  const t = e.changedTouches[0];
+  touch = {
+    id: t.identifier, startX: t.clientX, startY: t.clientY,
+    half: halfOf(t.clientX), state: "pending",
+    lastY: t.clientY, scrollAcc: 0, holdTimer: null,
+  };
+  touch.holdTimer = setTimeout(() => {
+    if (touch && touch.state === "pending") {
+      touch.state = "hold";
+      send({ t: "down", button: touch.half }); // press & hold for drag/select
+    }
+  }, CFG.HOLD_MS);
+  e.preventDefault();
+}, { passive: false });
+
+control.addEventListener("touchmove", (e) => {
+  if (!touch) return;
+  const t = [...e.changedTouches].find((x) => x.identifier === touch.id);
+  if (!t) return;
+  const dx = t.clientX - touch.startX;
+  const dy = t.clientY - touch.startY;
+
+  if (touch.state === "pending") {
+    if (Math.hypot(dx, dy) > CFG.MOVE_THRESH_PX) {
+      // moved before the hold timer -> swipe scroll
+      clearTimeout(touch.holdTimer);
+      touch.state = "scroll";
+      suppressMove = true;
+      $("scrollFlag").classList.add("on");
+    }
+  }
+  if (touch.state === "scroll") {
+    const d = t.clientY - touch.lastY;
+    touch.lastY = t.clientY;
+    touch.scrollAcc += d;
+    while (touch.scrollAcc >= CFG.SCROLL_STEP_PX) { send({ t: "scroll", dy: 1 }); touch.scrollAcc -= CFG.SCROLL_STEP_PX; }
+    while (touch.scrollAcc <= -CFG.SCROLL_STEP_PX) { send({ t: "scroll", dy: -1 }); touch.scrollAcc += CFG.SCROLL_STEP_PX; }
+  }
+  e.preventDefault();
+}, { passive: false });
+
+function endTouch(e) {
+  if (!touch) return;
+  const t = [...e.changedTouches].find((x) => x.identifier === touch.id);
+  if (!t) return;
+  clearTimeout(touch.holdTimer);
+  if (touch.state === "hold") {
+    send({ t: "up", button: touch.half });
+  } else if (touch.state === "pending") {
+    // quick tap, no move -> click
+    send({ t: "down", button: touch.half });
+    send({ t: "up", button: touch.half });
+  }
+  if (touch.state === "scroll") {
+    suppressMove = false;
+    $("scrollFlag").classList.remove("on");
+  }
+  touch = null;
+  e.preventDefault();
+}
+control.addEventListener("touchend", endTouch, { passive: false });
+control.addEventListener("touchcancel", endTouch, { passive: false });
+
+// ------------------------- orientation stream ------------------------
+// ~60 Hz via requestAnimationFrame (SPEC §2.4). Suppressed during swipe-scroll.
+function streamLoop() {
+  if (screen === "control" && connected && !suppressMove &&
+      orient.alpha != null && orient.beta != null) {
+    send({
+      t: "move",
+      beta: orient.beta,
+      alpha: orient.alpha,
+      gamma: orient.gamma ?? 0,
+      accel: accel,
+    });
+  }
+  requestAnimationFrame(streamLoop);
+}
+requestAnimationFrame(streamLoop);
+</script>
+</body>
+</html>

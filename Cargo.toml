@@ -1,0 +1,51 @@
+[package]
+name = "mousee"
+version = "0.1.0"
+edition = "2021"
+description = "Control your PC mouse from a phone via its gyroscope (single static binary)"
+license = "MIT"
+
+[[bin]]
+name = "mousee"
+path = "src/main.rs"
+
+[dependencies]
+# async runtime + networking
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "signal", "time"] }
+tokio-tungstenite = "0.23"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+# TLS (pure Rust, no system OpenSSL)
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls-pemfile = "2"
+
+# self-signed certificate generation (pure Rust)
+rcgen = { version = "0.13", features = ["pem"] }
+time = "0.3"
+
+# input injection + monitor geometry
+enigo = "0.2"
+display-info = "0.5"
+
+# serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# CLI / TUI / QR
+clap = { version = "4", features = ["derive"] }
+dialoguer = "0.11"
+qrcode = { version = "0.14", default-features = false }
+local-ip-address = "0.6"
+
+# logging + misc
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
