@@ -47,9 +47,38 @@ Scan the QR with your phone, **accept the self-signed certificate once**, tap
 |---|---|
 | `--ip <IPV4>` | Force the advertised LAN-IP, skip the picker. |
 | `--port <N>` | Port for page + WebSocket (default `8081`). |
-| `--yes` / `--no-tui` | Headless: use the recommended/forced IP, no picker. |
+| `--yes` / `--no-tui` | Headless: use the recommended/forced IP, no picker, no tray. |
 | `--no-tls` | Serve plain HTTP (⚠ iOS will **not** grant sensors). |
+| `--no-tray` | Don't show the tray icon; run in the foreground until Ctrl-C. |
 | `--debug` | Verbose, throttled per-frame mapping logs. |
+
+## System tray & background (Windows)
+
+Closing a console window kills its process — Windows offers no way around that.
+So mousee uses two processes:
+
+1. The **launcher** (this console) picks the interface, prints the QR, then
+   spawns…
+2. a **detached, console-less background worker** that runs the server and the
+   tray icon.
+
+That means you can **close the launcher console with the X** and the app keeps
+running in the tray — exactly like a normal background app. Quit from the tray
+icon → **Quit**.
+
+Tray menu:
+
+- a header showing the current `IP:port`,
+- **Show QR** — opens a fresh console window with the QR + URL (closing it does
+  not affect the running daemon),
+- **Quit**.
+
+The tooltip switches between "waiting for phone" and "phone connected".
+
+Use `--no-tray` to instead stay in the foreground (server + logs in this console,
+Ctrl-C to quit) — handy for debugging or running under a service manager.
+Build without it via `cargo build --release --no-default-features` (or run with
+`--no-tray`).
 
 ## Modes
 
@@ -76,9 +105,8 @@ All knobs are explicit constants at the top of the files:
 ## Notes / known limitations
 
 - **Linux/Wayland:** input injection (`enigo`) is restricted under Wayland; X11
-  works. Primary target is Windows.
-- **System-tray UX (SPEC §12.3)** is not implemented in this MVP. The daemon runs
-  in the foreground, prints the QR, and exits on Ctrl-C — which is sufficient per
-  the spec's "tray is enough for MVP" note. Tray + autostart is left as future work.
+  works. Primary target is Windows. The tray (`tray-icon` + `tao`) is also best
+  tested on Windows; disable with `--no-default-features` if it fails to build.
+- **Autostart at login** (SPEC §12.3) is not wired up; the tray itself is.
 - `alpha` is a compass/magnetometer reading: absolute horizontal is inherently
   less stable than relative and needs calibration. This is hardware, not a bug.

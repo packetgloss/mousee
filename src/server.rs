@@ -2,10 +2,12 @@
 //! Discriminates by the `Upgrade: websocket` header (SPEC §2.1).
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result};
+use base64::Engine;
 use futures_util::StreamExt;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -14,7 +16,7 @@ use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 use tokio_tungstenite::tungstenite::protocol::Role;
 use tokio_tungstenite::WebSocketStream;
 
-use crate::monitors::Layout;
+use crate::monitors::LayoutHandle;
 use crate::mouse::MouseCmd;
 use crate::processor::Processor;
 use crate::protocol::ClientMsg;
@@ -22,13 +24,21 @@ use crate::protocol::ClientMsg;
 /// Embedded HTML client — the whole UI in one file (SPEC §13.1).
 const CLIENT_HTML: &str = include_str!("../client/index.html");
 
+/// Favicon (48x48 PNG), derived from `src/icon.png` at build time (see build.rs).
+const FAVICON_PNG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/favicon.png"));
+
+/// Apple touch icon (180x180 PNG) for iOS "Add to Home Screen".
+const APPLE_TOUCH_PNG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/apple-touch-icon.png"));
+
 const MAX_HEAD: usize = 16 * 1024;
 
 #[derive(Clone)]
 pub struct Ctx {
-    pub layout: Arc<Layout>,
+    pub layout: LayoutHandle,
     pub mouse_tx: Sender<MouseCmd>,
     pub debug: bool,
+    /// True while at least one phone is connected (read by the tray).
+    pub connected: Arc<AtomicBool>,
 }
 
 /// Bind and serve forever. `tls` is `None` when running in plain-HTTP fallback.
@@ -96,8 +106,19 @@ where
         serve_ws(ws, ctx).await;
         Ok(())
     } else {
-        serve_page(&mut stream).await
+        match request_path(&text) {
+            Some(p) if p.starts_with("/favicon") => serve_png(&mut stream, FAVICON_PNG).await,
+            Some(p) if p.starts_with("/apple-touch-icon") => {
+                serve_png(&mut stream, APPLE_TOUCH_PNG).await
+            }
+            _ => serve_page(&mut stream).await,
+        }
     }
+}
+
+/// Extract the request-target (path) from the HTTP request line, e.g. `/favicon.ico`.
+fn request_path(req: &str) -> Option<&str> {
+    req.lines().next()?.split_whitespace().nth(1)
 }
 
 /// Read until the end of HTTP headers (`\r\n\r\n`), bounded by `MAX_HEAD`.
@@ -150,11 +171,26 @@ fn websocket_key(req: &str) -> Option<String> {
     }
 }
 
+/// The client page with the apple-touch-icon inlined as a `data:` URI.
+///
+/// iOS fetches `apple-touch-icon` in a *separate* request when adding the page
+/// to the Home Screen, and that request rejects our self-signed certificate —
+/// so a normal `href="/apple-touch-icon.png"` silently fails and iOS falls back
+/// to a letter glyph. Inlining the PNG avoids the extra fetch entirely.
+fn client_page() -> &'static str {
+    static PAGE: OnceLock<String> = OnceLock::new();
+    PAGE.get_or_init(|| {
+        let b64 = base64::engine::general_purpose::STANDARD.encode(APPLE_TOUCH_PNG);
+        let data_uri = format!("data:image/png;base64,{b64}");
+        CLIENT_HTML.replace("__APPLE_TOUCH_ICON__", &data_uri)
+    })
+}
+
 async fn serve_page<S>(stream: &mut S) -> Result<()>
 where
     S: AsyncWrite + Unpin,
 {
-    let body = CLIENT_HTML.as_bytes();
+    let body = client_page().as_bytes();
     let resp = format!(
         "HTTP/1.1 200 OK\r\n\
          Content-Type: text/html; charset=utf-8\r\n\
@@ -169,11 +205,30 @@ where
     Ok(())
 }
 
+async fn serve_png<S>(stream: &mut S, body: &[u8]) -> Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
+    let resp = format!(
+        "HTTP/1.1 200 OK\r\n\
+         Content-Type: image/png\r\n\
+         Content-Length: {}\r\n\
+         Cache-Control: max-age=86400\r\n\
+         Connection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(resp.as_bytes()).await?;
+    stream.write_all(body).await?;
+    stream.flush().await?;
+    Ok(())
+}
+
 async fn serve_ws<S>(mut ws: WebSocketStream<S>, ctx: Ctx)
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     tracing::info!("phone connected");
+    ctx.connected.store(true, Ordering::Relaxed);
     let mut proc = Processor::new(ctx.layout.clone(), ctx.debug);
 
     while let Some(msg) = ws.next().await {
@@ -206,5 +261,6 @@ where
             let _ = ctx.mouse_tx.send(cmd);
         }
     }
+    ctx.connected.store(false, Ordering::Relaxed);
     tracing::info!("phone disconnected");
 }

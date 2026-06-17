@@ -1,8 +1,11 @@
 //! Multi-monitor geometry & the virtual desktop bounding box (SPEC §6).
 
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
+
 use crate::config;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Monitor {
     pub x: i32,
     pub y: i32,
@@ -91,6 +94,16 @@ impl Layout {
             .expect("layout always has >= 1 monitor")
     }
 
+    /// Cheap structural equality used by the hotplug watcher to decide whether
+    /// anything actually changed (monitor added/removed/moved/resized).
+    fn same_geometry(&self, other: &Layout) -> bool {
+        self.origin_x == other.origin_x
+            && self.origin_y == other.origin_y
+            && self.width == other.width
+            && self.height == other.height
+            && self.monitors == other.monitors
+    }
+
     pub fn log_summary(&self) {
         tracing::info!(
             "virtual desktop: origin=({}, {}) size={}x{} over {} monitor(s)",
@@ -103,5 +116,54 @@ impl Layout {
         for (i, m) in self.monitors.iter().enumerate() {
             tracing::info!("  monitor #{i}: pos=({}, {}) size={}x{}", m.x, m.y, m.w, m.h);
         }
+    }
+}
+
+/// How often the background thread re-polls the OS for monitor changes.
+const WATCH_INTERVAL: Duration = Duration::from_secs(2);
+
+/// A hot-swappable handle to the current [`Layout`]. The OS layout can change at
+/// runtime (a monitor is plugged in, unplugged, or rearranged); a background
+/// thread re-detects it and atomically swaps in the new geometry, so the cursor
+/// mapping always reflects the live virtual desktop (SPEC §6).
+#[derive(Clone)]
+pub struct LayoutHandle {
+    inner: Arc<RwLock<Arc<Layout>>>,
+}
+
+impl LayoutHandle {
+    /// Detect the layout once and wrap it. Call [`spawn_watcher`] to keep it live.
+    pub fn detect() -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(Arc::new(Layout::detect()))),
+        }
+    }
+
+    /// Snapshot the current layout (cheap `Arc` clone). Callers hold this for the
+    /// duration of a single frame so a mid-frame swap can't tear the mapping.
+    pub fn current(&self) -> Arc<Layout> {
+        self.inner.read().expect("layout lock poisoned").clone()
+    }
+
+    fn store(&self, layout: Arc<Layout>) {
+        *self.inner.write().expect("layout lock poisoned") = layout;
+    }
+
+    /// Spawn the hotplug watcher thread. Polls the OS every [`WATCH_INTERVAL`]
+    /// and swaps the layout in (logging the new geometry) whenever it changes.
+    pub fn spawn_watcher(&self) {
+        let handle = self.clone();
+        std::thread::Builder::new()
+            .name("mousee-monitors".into())
+            .spawn(move || loop {
+                std::thread::sleep(WATCH_INTERVAL);
+                let fresh = Layout::detect();
+                if !fresh.same_geometry(&handle.current()) {
+                    tracing::info!("monitor layout changed — updating virtual desktop");
+                    fresh.log_summary();
+                    handle.store(Arc::new(fresh));
+                }
+            })
+            .expect("spawning monitor watcher thread");
     }
 }

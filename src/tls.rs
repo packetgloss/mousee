@@ -16,8 +16,20 @@ use time::{Duration, OffsetDateTime};
 
 use crate::config;
 
+/// Per-user directory for the cached cert/key/ip.
+///
+/// On Windows this is `%LOCALAPPDATA%\mousee` (e.g.
+/// `C:\Users\you\AppData\Local\mousee`); elsewhere it falls back to
+/// `$XDG_DATA_HOME`/`$HOME` and finally the current directory.
 fn dir() -> PathBuf {
-    PathBuf::from(config::CERT_DIR)
+    let base = if cfg!(windows) {
+        std::env::var_os("LOCALAPPDATA")
+    } else {
+        std::env::var_os("XDG_DATA_HOME").or_else(|| std::env::var_os("HOME"))
+    };
+    base.map(PathBuf::from)
+        .unwrap_or_default()
+        .join(config::CERT_DIR)
 }
 
 struct Pems {

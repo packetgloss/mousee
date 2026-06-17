@@ -4,6 +4,9 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-title" content="mousee" />
+<link rel="icon" type="image/png" href="/favicon.png" />
+<link rel="apple-touch-icon" sizes="180x180" href="__APPLE_TOUCH_ICON__" />
 <title>mousee</title>
 <style>
   /* ====================== CLIENT TUNING (SPEC §8) ====================== */
@@ -92,9 +95,6 @@
   .hint { position: absolute; left: 0; right: 0; bottom: 0; padding: 14px 18px calc(14px + env(safe-area-inset-bottom));
     background: linear-gradient(transparent, #0b0e13 40%); font-size: 12px; color: var(--muted);
     text-align: center; line-height: 1.5; }
-  .scrollflag { position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
-    font-size: 12px; color: var(--accent); opacity: 0; transition: opacity .1s; }
-  .scrollflag.on { opacity: 1; }
   .topbar { display:flex; align-items:center; gap:10px; }
   .iconbtn { background: var(--panel2); border-radius: 10px; padding: 8px 12px; font-size: 13px; }
 </style>
@@ -169,7 +169,6 @@
     <div class="half">L · click</div>
     <div class="half">R · click</div>
   </div>
-  <div id="scrollFlag" class="scrollflag">scrolling…</div>
   <div class="hint">
     Tap = click (L/R) · Hold then aim = drag/select · Swipe = scroll<br/>
     Aim the phone to move the cursor.
@@ -189,7 +188,11 @@ const CFG = {
 // ----------------------------- state ---------------------------------
 let ws = null;
 let connected = false;
+let everConnected = false;     // gate auto-reconnect on a first successful link
 let screen = "setup";
+let mode = null;               // chosen mode, replayed on reconnect
+let reconnectTimer = null;
+let reconnectDelay = 250;      // grows on repeated failure, reset on success
 const orient = { alpha: null, beta: null, gamma: null };
 let accel = null; // [x,y,z]
 const calibrated = {}; // corner -> {beta, alpha}
@@ -216,29 +219,84 @@ function wsUrl() {
   const port = location.port || CFG.DEFAULT_PORT;
   return `${proto}//${ip}:${port}`;
 }
+// The server keeps no state across sockets, so on every (re)connect we replay
+// the full session — mode, smoothing, anti-jitter and any calibration — so a
+// dropped link (screen lock, browser backgrounded) restores silently.
+function replayState() {
+  if (mode) send({ t: "mode", mode });
+  send({ t: "smoothing", value: parseFloat($("smoothing").value) });
+  send({ t: "anti_jitter", on: $("ajToggle").classList.contains("on") });
+  if (mode === "absolute") {
+    send({ t: "reset_calib" });
+    for (const c of CORNERS) {
+      if (calibrated[c]) {
+        send({ t: "calib", point: c, beta: calibrated[c].beta, alpha: calibrated[c].alpha });
+      }
+    }
+  }
+}
+function scheduleReconnect() {
+  if (reconnectTimer != null) return;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connect();
+  }, reconnectDelay);
+  reconnectDelay = Math.min(reconnectDelay * 2, 2000);
+}
+// Try to reconnect right now, skipping any pending backoff (used when the user
+// returns to the page / the network comes back).
+function reconnectNow() {
+  if (connected || !everConnected) return;
+  if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return;
+  clearTimeout(reconnectTimer);
+  reconnectTimer = null;
+  reconnectDelay = 250;
+  connect();
+}
 function connect() {
+  if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return;
   try {
     ws = new WebSocket(wsUrl());
   } catch (e) {
     $("setupErr").textContent = "Bad address: " + e.message;
     return;
   }
-  setStatus(false, "connecting…");
+  setStatus(false, everConnected ? "reconnecting…" : "connecting…");
   ws.onopen = () => {
     connected = true;
+    everConnected = true;
+    reconnectDelay = 250;
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
     setStatus(true, "connected");
-    show("mode");
+    replayState();
+    if (screen === "setup") show("mode"); // first connect; reconnect keeps screen
   };
   ws.onclose = () => {
     connected = false;
-    setStatus(false, "disconnected");
-    if (screen !== "setup") show("setup");
+    if (everConnected) {
+      setStatus(false, "reconnecting…");
+      scheduleReconnect(); // keep the current screen; restore silently
+    } else {
+      setStatus(false, "disconnected");
+    }
   };
   ws.onerror = () => {
-    $("setupErr").textContent = "Connection failed. Check IP, port and that you accepted the certificate.";
-    setStatus(false, "error");
+    if (!everConnected) {
+      $("setupErr").textContent = "Connection failed. Check IP, port and that you accepted the certificate.";
+      setStatus(false, "error");
+    }
+    // After a successful first link, errors are handled by onclose's reconnect.
   };
 }
+
+// Reconnect instantly when the user comes back or the network returns.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") reconnectNow();
+});
+window.addEventListener("focus", reconnectNow);
+window.addEventListener("pageshow", reconnectNow);
+window.addEventListener("online", reconnectNow);
 
 // ------------------- sensor permission (iOS gesture) -----------------
 async function requestSensors() {
@@ -279,10 +337,12 @@ $("connectBtn").addEventListener("click", async () => {
 
 // --------------------------- mode screen -----------------------------
 $("modeRelative").addEventListener("click", () => {
+  mode = "relative";
   send({ t: "mode", mode: "relative" });
   startControl();
 });
 $("modeAbsolute").addEventListener("click", () => {
+  mode = "absolute";
   send({ t: "mode", mode: "absolute" });
   send({ t: "reset_calib" });
   for (const k in calibrated) delete calibrated[k];
@@ -406,7 +466,6 @@ control.addEventListener("touchmove", (e) => {
       clearTimeout(touch.holdTimer);
       touch.state = "scroll";
       suppressMove = true;
-      $("scrollFlag").classList.add("on");
     }
   }
   if (touch.state === "scroll") {
@@ -433,7 +492,6 @@ function endTouch(e) {
   }
   if (touch.state === "scroll") {
     suppressMove = false;
-    $("scrollFlag").classList.remove("on");
   }
   touch = null;
   e.preventDefault();

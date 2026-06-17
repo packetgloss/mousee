@@ -39,9 +39,33 @@ qrcode = { version = "0.14", default-features = false }
 local-ip-address = "0.6"
 
 # logging + misc
+base64 = "0.22"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
+
+# system tray (optional; needs a native event loop on the main thread)
+tray-icon = { version = "0.19", optional = true }
+tao = { version = "0.30", optional = true }
+
+# Single-instance guard (named mutex) so a second launch bails out.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_Console",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[features]
+default = ["tray"]
+tray = ["dep:tray-icon", "dep:tao"]
+
+# Icons (exe, tray, favicon) are all derived from src/icon.png at build time.
+[build-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+ico = "0.3"
+winresource = "0.1"
 
 [profile.release]
 opt-level = "z"

@@ -2,13 +2,12 @@
 //! absolute (calibrated) and relative (air-mouse) modes (SPEC §5, §6).
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::config;
-use crate::monitors::Layout;
+use crate::monitors::LayoutHandle;
 use crate::mouse::MouseCmd;
-use crate::protocol::{Btn, ClientMsg, Corner, Mode};
+use crate::protocol::{ClientMsg, Corner, Mode};
 
 /// Computed calibration bounds derived from the 4 corners (SPEC §5.1).
 #[derive(Debug, Clone, Copy)]
@@ -20,7 +19,7 @@ struct Bounds {
 }
 
 pub struct Processor {
-    layout: Arc<Layout>,
+    layout: LayoutHandle,
     debug: bool,
 
     mode: Mode,
@@ -45,7 +44,7 @@ pub struct Processor {
 }
 
 impl Processor {
-    pub fn new(layout: Arc<Layout>, debug: bool) -> Self {
+    pub fn new(layout: LayoutHandle, debug: bool) -> Self {
         Self {
             layout,
             debug,
@@ -170,7 +169,7 @@ impl Processor {
     fn on_move(&mut self, beta: f64, alpha: f64, accel: Option<[f64; 3]>) -> Vec<MouseCmd> {
         match self.mode {
             Mode::Absolute => self.absolute(beta, alpha, accel),
-            Mode::Relative => self.relative(beta, alpha),
+            Mode::Relative => self.relative(beta, alpha, accel),
         }
     }
 
@@ -179,6 +178,8 @@ impl Processor {
         let Some(b) = self.bounds else {
             return vec![]; // not calibrated yet
         };
+        // Snapshot the live layout for this frame (it may change under hotplug).
+        let layout = self.layout.current();
 
         // Pull live alpha onto the continuous axis around the calibrated center.
         let center = (b.alpha_left + b.alpha_right) / 2.0;
@@ -200,11 +201,11 @@ impl Processor {
 
         // Horizontal spans the whole virtual desktop so the pointer crosses all
         // monitors (SPEC §5.1 / §6 step 1).
-        let target_x_f = self.layout.origin_x as f64 + frac_x * self.layout.width as f64;
+        let target_x_f = layout.origin_x as f64 + frac_x * layout.width as f64;
         let target_x = target_x_f.round() as i32;
 
         // Vertical is stretched over the REAL monitor under the pointer (§6).
-        let mon = *self.layout.monitor_for_x(target_x);
+        let mon = *layout.monitor_for_x(target_x);
         let cx = target_x.clamp(mon.x, mon.x + mon.w - 1);
         let cy_f = mon.y as f64 + frac_y * mon.h as f64;
         let cy = (cy_f.round() as i32).clamp(mon.y, mon.y + mon.h - 1);
@@ -243,7 +244,7 @@ impl Processor {
     }
 
     // --- Relative (air-mouse) mode (SPEC §5.2) -----------------------------
-    fn relative(&mut self, beta: f64, alpha: f64) -> Vec<MouseCmd> {
+    fn relative(&mut self, beta: f64, alpha: f64, accel: Option<[f64; 3]>) -> Vec<MouseCmd> {
         // Need two samples to take a delta; first frame only primes the state.
         let (Some(pa), Some(pb)) = (self.prev_alpha, self.prev_beta) else {
             self.prev_alpha = Some(alpha);
@@ -263,19 +264,30 @@ impl Processor {
         self.prev_alpha = Some(alpha);
         self.prev_beta = Some(beta);
 
-        let dx = config::REL_SIGN_X * shape(da);
-        let dy = config::REL_SIGN_Y * shape(db);
+        let dx = config::REL_SIGN_X * shape(da, config::REL_SENSITIVITY_X);
+        let dy = config::REL_SIGN_Y * shape(db, config::REL_SENSITIVITY_Y);
 
-        // Low-pass the velocity for smoothness.
-        let s = config::REL_VEL_SMOOTH;
+        // Low-pass the velocity for smoothness. The softness slider drives this
+        // in relative mode (lower = smoother/floatier, higher = snappier).
+        // Anti-jitter, when on, lowers it further on shaky frames.
+        let mut s = self.smoothing.clamp(0.05, 1.0);
+        if self.anti_jitter {
+            if let Some([ax, ay, az]) = accel {
+                let jitter = ((ax * ax + ay * ay + az * az).sqrt() - 9.8).abs();
+                if jitter > config::ANTIJITTER_THRESHOLD {
+                    s = s.min(config::ANTIJITTER_SMOOTHING);
+                }
+            }
+        }
         self.vel.0 = self.vel.0 * (1.0 - s) + dx * s;
         self.vel.1 = self.vel.1 * (1.0 - s) + dy * s;
 
+        let layout = self.layout.current();
         let (ox, oy, w, h) = (
-            self.layout.origin_x,
-            self.layout.origin_y,
-            self.layout.width,
-            self.layout.height,
+            layout.origin_x,
+            layout.origin_y,
+            layout.width,
+            layout.height,
         );
         if !self.has_pos {
             // Start from the center of the virtual desktop.
@@ -300,11 +312,16 @@ impl Processor {
     }
 }
 
-/// Shaping function for a per-frame delta: dead zone + power-curve acceleration.
-fn shape(d: f64) -> f64 {
+/// Shaping for a per-frame delta: dead zone, then a *linear base* plus a
+/// velocity-proportional acceleration term. Linear at low speed keeps slow arcs
+/// smooth and precise; the extra term lets a fast flick cover the whole desktop
+/// without huge arm motion. Output px = sens * e * (1 + REL_ACCEL * e), where
+/// `e` is the deadzone-corrected angular speed (deg/frame).
+fn shape(d: f64, sensitivity: f64) -> f64 {
     let m = d.abs();
     if m < config::REL_DEADZONE {
         return 0.0;
     }
-    d.signum() * (m - config::REL_DEADZONE).powf(config::REL_EXP) * config::REL_SENSITIVITY
+    let e = m - config::REL_DEADZONE;
+    d.signum() * sensitivity * e * (1.0 + config::REL_ACCEL * e)
 }
