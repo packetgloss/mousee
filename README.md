@@ -1,4 +1,8 @@
-# mousee
+<p align="center">
+  <img src="src/icon.png" width="128" alt="mousee" />
+</p>
+
+<h1 align="center">mousee</h1>
 
 Turn your phone into an air-mouse / laser pointer for your PC. The phone's
 browser streams device-orientation data over a WebSocket to a small Rust daemon
