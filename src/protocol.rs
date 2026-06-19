@@ -16,7 +16,8 @@ pub enum Btn {
     Right,
 }
 
-/// Calibration corner identifiers (SPEC §4.3 / §5.1).
+/// Calibration corner identifiers (SPEC §4.3 / §5.1). Only the 4 real corners;
+/// the spec's "Center" point is intentionally unused, so it isn't modelled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum Corner {
@@ -24,7 +25,6 @@ pub enum Corner {
     Tr,
     Bl,
     Br,
-    Center,
 }
 
 /// Every message the phone can send. Tagged by the `t` field.

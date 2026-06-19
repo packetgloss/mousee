@@ -15,7 +15,6 @@ pub enum MouseCmd {
     MoveTo(i32, i32),
     Press(Btn),
     Release(Btn),
-    Click(Btn),
     /// Vertical wheel, in (already signed) ticks.
     Scroll(i32),
 }
@@ -61,7 +60,6 @@ fn apply(enigo: &mut Enigo, cmd: MouseCmd) -> Result<(), enigo::InputError> {
         MouseCmd::MoveTo(x, y) => enigo.move_mouse(x, y, Coordinate::Abs),
         MouseCmd::Press(b) => enigo.button(button(b), Direction::Press),
         MouseCmd::Release(b) => enigo.button(button(b), Direction::Release),
-        MouseCmd::Click(b) => enigo.button(button(b), Direction::Click),
         MouseCmd::Scroll(ticks) => enigo.scroll(ticks, Axis::Vertical),
     }
 }

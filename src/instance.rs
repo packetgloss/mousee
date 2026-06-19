@@ -20,10 +20,6 @@ mod imp {
         OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
     }
 
-    fn wide_name() -> Vec<u16> {
-        wide(NAME)
-    }
-
     /// Keeps the singleton mutex alive for the lifetime of the process.
     pub struct Guard(HANDLE);
 
@@ -42,7 +38,7 @@ mod imp {
     /// guard for as long as this process should be considered "the instance".
     /// `None` means another instance already owns the mutex.
     pub fn acquire() -> Option<Guard> {
-        let name = wide_name();
+        let name = wide(NAME);
         let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
         if handle.is_null() {
             // Could not create the object — don't block startup over it.

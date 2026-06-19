@@ -92,6 +92,16 @@ fn generate(ip: Ipv4Addr) -> Result<Pems> {
     })
 }
 
+/// Ensure a usable cert/key exists on disk for `ip`, generating and caching one
+/// if needed. The launcher calls this purely to learn whether TLS is available
+/// (and thus which scheme the QR should advertise); the server process then
+/// builds the actual rustls config from the same on-disk cache via
+/// [`server_config`]. This way TLS is set up once — we no longer build a whole
+/// throwaway `ServerConfig` just to test it.
+pub fn ensure_cert(ip: Ipv4Addr) -> Result<()> {
+    load_or_generate(ip).map(|_| ())
+}
+
 /// Build a rustls server config for the given LAN-IP.
 pub fn server_config(ip: Ipv4Addr) -> Result<Arc<ServerConfig>> {
     let pems = load_or_generate(ip)?;

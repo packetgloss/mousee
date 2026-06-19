@@ -14,28 +14,6 @@ use tao::event_loop::{ControlFlow, EventLoop};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIconBuilder};
 
-/// Show the connection QR. The worker has no console of its own, so spawn a
-/// fresh console window (a hidden `--show-qr` mode of this same binary) that
-/// prints the QR + URL and waits. Closing that window does not affect the daemon.
-#[cfg(windows)]
-fn show_qr(url: &str) {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
-    if let Ok(exe) = std::env::current_exe() {
-        let _ = std::process::Command::new(exe)
-            .arg("--show-qr")
-            .arg("--url")
-            .arg(url)
-            .creation_flags(CREATE_NEW_CONSOLE)
-            .spawn();
-    }
-}
-
-#[cfg(not(windows))]
-fn show_qr(url: &str) {
-    println!("Address: {url}");
-}
-
 /// The tray icon: a 32x32 RGBA buffer decoded from `src/icon.png` at build time
 /// (see build.rs), embedded directly so the runtime needs no image crate.
 fn build_icon() -> Option<Icon> {
@@ -53,20 +31,16 @@ fn tooltip(ip: Ipv4Addr, port: u16, connected: bool) -> String {
 }
 
 /// Run the tray event loop. Blocks the calling (main) thread until "Quit".
-pub fn run(url: String, ip: Ipv4Addr, port: u16, connected: Arc<AtomicBool>) -> ! {
+pub fn run(ip: Ipv4Addr, port: u16, connected: Arc<AtomicBool>) -> ! {
     let event_loop: EventLoop<()> = EventLoop::new();
 
     let menu = Menu::new();
     let header = MenuItem::new(format!("mousee  {ip}:{port}"), false, None);
-    let qr = MenuItem::new("Show QR", true, None);
     let quit = MenuItem::new("Quit", true, None);
     let _ = menu.append(&header);
     let _ = menu.append(&PredefinedMenuItem::separator());
-    let _ = menu.append(&qr);
-    let _ = menu.append(&PredefinedMenuItem::separator());
     let _ = menu.append(&quit);
 
-    let qr_id = qr.id().clone();
     let quit_id = quit.id().clone();
 
     let mut builder = TrayIconBuilder::new()
@@ -100,9 +74,7 @@ pub fn run(url: String, ip: Ipv4Addr, port: u16, connected: Arc<AtomicBool>) -> 
         }
 
         while let Ok(ev) = menu_rx.try_recv() {
-            if ev.id == qr_id {
-                show_qr(&url);
-            } else if ev.id == quit_id {
+            if ev.id == quit_id {
                 std::process::exit(0);
             }
         }

@@ -71,6 +71,26 @@ impl Processor {
         self.has_pos = false;
     }
 
+    /// Dynamic anti-jitter: on a frame whose accel magnitude departs from ~9.8
+    /// (a shaky hand), force the smoothing factor down so the tremor is damped
+    /// harder (SPEC §5.1). Returns `base` unchanged when anti-jitter is off,
+    /// there's no accel sample, or the frame is steady. Always lowers, never
+    /// raises, the factor.
+    fn jitter_floor(&self, base: f64, accel: Option<[f64; 3]>) -> f64 {
+        if !self.anti_jitter {
+            return base;
+        }
+        let Some([ax, ay, az]) = accel else {
+            return base;
+        };
+        let jitter = ((ax * ax + ay * ay + az * az).sqrt() - 9.8).abs();
+        if jitter > config::ANTIJITTER_THRESHOLD {
+            base.min(config::ANTIJITTER_SMOOTHING)
+        } else {
+            base
+        }
+    }
+
     fn should_log(&mut self, cat: &'static str) -> bool {
         if !self.debug {
             return false;
@@ -212,16 +232,7 @@ impl Processor {
         let target = (cx as f64, cy as f64);
 
         // EMA smoothing, with dynamic anti-jitter reducing the factor (§5.1).
-        let mut sf = self.smoothing;
-        if self.anti_jitter {
-            if let Some([ax, ay, az]) = accel {
-                let mag = (ax * ax + ay * ay + az * az).sqrt();
-                let jitter = (mag - 9.8).abs();
-                if jitter > config::ANTIJITTER_THRESHOLD {
-                    sf = config::ANTIJITTER_SMOOTHING;
-                }
-            }
-        }
+        let sf = self.jitter_floor(self.smoothing, accel);
 
         if !self.has_pos {
             self.pos = target;
@@ -270,15 +281,7 @@ impl Processor {
         // Low-pass the velocity for smoothness. The softness slider drives this
         // in relative mode (lower = smoother/floatier, higher = snappier).
         // Anti-jitter, when on, lowers it further on shaky frames.
-        let mut s = self.smoothing.clamp(0.05, 1.0);
-        if self.anti_jitter {
-            if let Some([ax, ay, az]) = accel {
-                let jitter = ((ax * ax + ay * ay + az * az).sqrt() - 9.8).abs();
-                if jitter > config::ANTIJITTER_THRESHOLD {
-                    s = s.min(config::ANTIJITTER_SMOOTHING);
-                }
-            }
-        }
+        let s = self.jitter_floor(self.smoothing.clamp(0.05, 1.0), accel);
         self.vel.0 = self.vel.0 * (1.0 - s) + dx * s;
         self.vel.1 = self.vel.1 * (1.0 - s) + dy * s;
 

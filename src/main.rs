@@ -58,24 +58,6 @@ struct Args {
     /// Internal: run as the detached background worker (server + tray).
     #[arg(long, hide = true)]
     background: bool,
-
-    /// Internal: print the QR for --url in this (fresh) console window.
-    #[arg(long, hide = true)]
-    show_qr: bool,
-
-    /// Internal: URL used by --show-qr.
-    #[arg(long, hide = true)]
-    url: Option<String>,
-}
-
-/// Hidden `--show-qr` mode: a standalone console window that prints the QR and
-/// the URL, then waits so the user can scan it. Spawned by the tray.
-fn run_show_qr(url: String) -> Result<()> {
-    tui::print_qr(&url);
-    println!("  Press Enter or close this window when done.");
-    let mut line = String::new();
-    let _ = std::io::stdin().read_line(&mut line);
-    Ok(())
 }
 
 fn init_logging(debug: bool) {
@@ -146,8 +128,7 @@ fn run_worker(args: Args) -> Result<()> {
 
     #[cfg(feature = "tray")]
     {
-        let url = format!("{_scheme}://{ip}:{}", args.port);
-        tray::run(url, ip, args.port, _connected); // takes over the thread (diverges)
+        tray::run(ip, args.port, _connected); // takes over the thread (diverges)
     }
 
     #[cfg(not(feature = "tray"))]
@@ -187,9 +168,9 @@ fn spawn_worker(args: &Args, ip: Ipv4Addr) -> Result<()> {
     if args.no_tls {
         cmd.arg("--no-tls");
     }
-    if args.debug {
-        cmd.arg("--debug");
-    }
+    // No `--debug`: the detached worker has no console and installs no log
+    // subscriber, so logging is foreground-only by design (run with --no-tray
+    // to see logs). Forwarding --debug here would just be a silent no-op.
     cmd.creation_flags(DETACHED_PROCESS);
     cmd.spawn().context("spawning background worker")?;
     Ok(())
@@ -198,12 +179,8 @@ fn spawn_worker(args: &Args, ip: Ipv4Addr) -> Result<()> {
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Standalone QR console window spawned by the tray.
-    if args.show_qr {
-        return run_show_qr(args.url.unwrap_or_default());
-    }
-
-    // Detached background worker has no console: don't init stdout logging.
+    // Detached background worker has no console, so it installs no log
+    // subscriber: logging is foreground-only by design (use --no-tray to see it).
     if args.background {
         return run_worker(args);
     }
@@ -220,8 +197,9 @@ fn main() -> Result<()> {
     init_logging(args.debug);
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    // Pick the LAN-IP and determine the scheme (this also caches the cert that
-    // the background worker will reuse).
+    // Pick the LAN-IP, then make sure a cert exists so the QR can show the right
+    // scheme. Generating it here warms the on-disk cache that the server process
+    // (background worker or foreground) reuses, so TLS is actually set up once.
     let preferred = args
         .ip
         .or_else(|| config::PREFERRED_IP.and_then(|s| s.parse().ok()));
@@ -230,7 +208,7 @@ fn main() -> Result<()> {
         tracing::warn!("TLS disabled (--no-tls): iPhone will not grant sensor access");
         "http"
     } else {
-        match tls::server_config(ip) {
+        match tls::ensure_cert(ip) {
             Ok(_) => "https",
             Err(e) => {
                 tracing::warn!("could not enable TLS ({e}); falling back to HTTP");

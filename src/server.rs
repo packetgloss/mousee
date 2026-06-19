@@ -107,11 +107,21 @@ where
         Ok(())
     } else {
         match request_path(&text) {
-            Some(p) if p.starts_with("/favicon") => serve_png(&mut stream, FAVICON_PNG).await,
-            Some(p) if p.starts_with("/apple-touch-icon") => {
-                serve_png(&mut stream, APPLE_TOUCH_PNG).await
+            Some(p) if p.starts_with("/favicon") => {
+                serve_bytes(&mut stream, "image/png", "max-age=86400", FAVICON_PNG).await
             }
-            _ => serve_page(&mut stream).await,
+            Some(p) if p.starts_with("/apple-touch-icon") => {
+                serve_bytes(&mut stream, "image/png", "max-age=86400", APPLE_TOUCH_PNG).await
+            }
+            _ => {
+                serve_bytes(
+                    &mut stream,
+                    "text/html; charset=utf-8",
+                    "no-store",
+                    client_page().as_bytes(),
+                )
+                .await
+            }
         }
     }
 }
@@ -186,34 +196,17 @@ fn client_page() -> &'static str {
     })
 }
 
-async fn serve_page<S>(stream: &mut S) -> Result<()>
-where
-    S: AsyncWrite + Unpin,
-{
-    let body = client_page().as_bytes();
-    let resp = format!(
-        "HTTP/1.1 200 OK\r\n\
-         Content-Type: text/html; charset=utf-8\r\n\
-         Content-Length: {}\r\n\
-         Cache-Control: no-store\r\n\
-         Connection: close\r\n\r\n",
-        body.len()
-    );
-    stream.write_all(resp.as_bytes()).await?;
-    stream.write_all(body).await?;
-    stream.flush().await?;
-    Ok(())
-}
-
-async fn serve_png<S>(stream: &mut S, body: &[u8]) -> Result<()>
+/// Write a single `200 OK` response with the given content type, cache policy
+/// and body (the page and both icons all go through here).
+async fn serve_bytes<S>(stream: &mut S, content_type: &str, cache: &str, body: &[u8]) -> Result<()>
 where
     S: AsyncWrite + Unpin,
 {
     let resp = format!(
         "HTTP/1.1 200 OK\r\n\
-         Content-Type: image/png\r\n\
+         Content-Type: {content_type}\r\n\
          Content-Length: {}\r\n\
-         Cache-Control: max-age=86400\r\n\
+         Cache-Control: {cache}\r\n\
          Connection: close\r\n\r\n",
         body.len()
     );

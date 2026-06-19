@@ -75,12 +75,11 @@
   .dot.ok { background: var(--good); }
 
   /* calibration grid */
-  .calib-grid { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr 1fr;
+  .calib-grid { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr;
     gap: 12px; flex: 1; }
   .corner { border-radius: 14px; background: var(--panel); border: 2px solid var(--panel2);
     font-size: 15px; font-weight: 600; display: flex; align-items: center; justify-content: center; }
   .corner.done { background: #14301c; border-color: var(--good); color: var(--good); }
-  .corner.center { grid-column: 1 / span 2; }
   .readout { font-variant-numeric: tabular-nums; font-size: 13px; color: var(--muted);
     text-align: center; margin: 10px 0; }
   #calibCanvas { display: block; margin: 0 auto; background: var(--panel);
@@ -157,7 +156,6 @@
   <div class="calib-grid" style="margin-top:12px;">
     <button class="corner" data-c="TL">Top-Left</button>
     <button class="corner" data-c="TR">Top-Right</button>
-    <button class="corner center" data-c="CENTER">Center (optional)</button>
     <button class="corner" data-c="BL">Bottom-Left</button>
     <button class="corner" data-c="BR">Bottom-Right</button>
   </div>
@@ -360,7 +358,7 @@ $("smoothing").addEventListener("input", (e) => {
 });
 
 // ------------------------ calibration screen -------------------------
-const CORNERS = ["TL", "TR", "BL", "BR"]; // CENTER is optional / unused (SPEC §5.1)
+const CORNERS = ["TL", "TR", "BL", "BR"]; // the 4 calibrated corners (SPEC §5.1)
 function refreshCorners() {
   document.querySelectorAll(".corner").forEach((b) => {
     b.classList.toggle("done", !!calibrated[b.dataset.c]);
