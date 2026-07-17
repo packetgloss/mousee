@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use crate::config;
 use crate::monitors::LayoutHandle;
 use crate::mouse::MouseCmd;
-use crate::protocol::{ClientMsg, Corner, Mode, RotationDelta};
+use crate::protocol::{ClientMsg, Corner, Mode};
 
 /// Computed calibration bounds derived from the 4 corners (SPEC §5.1).
 #[derive(Debug, Clone, Copy)]
@@ -221,12 +221,7 @@ impl Processor {
                     vec![MouseCmd::Scroll(ticks)]
                 }
             }
-            ClientMsg::Move {
-                beta,
-                alpha,
-                gamma,
-                rotation_delta,
-            } => self.on_move(beta, alpha, gamma, rotation_delta),
+            ClientMsg::Move { beta, alpha, gamma } => self.on_move(beta, alpha, gamma),
         }
     }
 
@@ -265,19 +260,13 @@ impl Processor {
         );
     }
 
-    fn on_move(
-        &mut self,
-        beta: f64,
-        alpha: f64,
-        gamma: f64,
-        rotation_delta: Option<RotationDelta>,
-    ) -> Vec<MouseCmd> {
+    fn on_move(&mut self, beta: f64, alpha: f64, gamma: f64) -> Vec<MouseCmd> {
         if self.should_log("sensor") {
             tracing::debug!("sensor: alpha={alpha:.2} beta={beta:.2} gamma={gamma:.2}");
         }
         match self.mode {
             Mode::Absolute => self.absolute(beta, alpha),
-            Mode::Relative => self.relative(beta, alpha, gamma, rotation_delta),
+            Mode::Relative => self.relative(beta, alpha, gamma),
         }
     }
 
@@ -344,13 +333,7 @@ impl Processor {
     }
 
     // --- Relative (air-mouse) mode (SPEC §5.2) -----------------------------
-    fn relative(
-        &mut self,
-        beta: f64,
-        alpha: f64,
-        gamma: f64,
-        rotation_delta: Option<RotationDelta>,
-    ) -> Vec<MouseCmd> {
+    fn relative(&mut self, beta: f64, alpha: f64, gamma: f64) -> Vec<MouseCmd> {
         let now = Instant::now();
         // Need two samples to take a delta; first frame only primes the state.
         let (Some(prev_alpha), Some(prev_beta), Some(prev_gamma), Some(prev_at)) = (
@@ -386,18 +369,9 @@ impl Processor {
             return vec![];
         }
 
-        let euler = (
-            wrapped_delta(alpha, prev_alpha),
-            beta - prev_beta,
-            wrapped_delta(gamma, prev_gamma),
-        );
-        // The browser integrates each DeviceMotion sample against its own
-        // timestamp and unrolls the phone-local axes before sending. Older
-        // clients (or denied motion permission) retain the Euler fallback.
-        let (input, source) = rotation_delta.map_or((euler, "euler"), |delta| {
-            ((delta.alpha, delta.beta, delta.gamma), "gyro_unrolled")
-        });
-        let (da, db, dg) = input;
+        let da = wrapped_delta(alpha, prev_alpha);
+        let db = beta - prev_beta;
+        let dg = wrapped_delta(gamma, prev_gamma);
         let shaped = (
             config::REL_SIGN_X * shape(da, config::REL_SENSITIVITY_X),
             config::REL_SIGN_Y * shape(db, config::REL_SENSITIVITY_Y),
@@ -434,19 +408,7 @@ impl Processor {
 
         if self.should_log("rel") {
             tracing::debug!(
-                "rel: source={source} gyro_local_deg={} gyro_unrolled_deg={} sensor_ms={:.1} euler_deg=({:.2},{:.2},{:.2}) input_deg=({da:.2},{db:.2},{dg:.2}) shaped=({:.1},{:.1}) compressed=({:.1},{:.1}) cutoff_min={min_cutoff_hz:.1}Hz v=({:.1},{:.1}) pos=({},{})",
-                rotation_delta.map_or_else(
-                    || "none".to_string(),
-                    |d| format!("({:.2},{:.2},{:.2})", d.local_alpha, d.local_beta, d.local_gamma)
-                ),
-                rotation_delta.map_or_else(
-                    || "none".to_string(),
-                    |d| format!("({:.2},{:.2},{:.2})", d.alpha, d.beta, d.gamma)
-                ),
-                rotation_delta.map_or(0.0, |d| d.sample_ms),
-                euler.0,
-                euler.1,
-                euler.2,
+                "rel: euler_deg=({da:.2},{db:.2},{dg:.2}) shaped=({:.1},{:.1}) compressed=({:.1},{:.1}) cutoff_min={min_cutoff_hz:.1}Hz v=({:.1},{:.1}) pos=({},{})",
                 shaped.0,
                 shaped.1,
                 compressed.0,

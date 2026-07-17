@@ -179,24 +179,6 @@ let mode = null;               // chosen mode, replayed on reconnect
 let reconnectTimer = null;
 let reconnectDelay = 250;      // grows on repeated failure, reset on success
 const orient = { alpha: null, beta: null, gamma: null };
-// DeviceMotion rates live in axes attached to the phone. Accumulate every
-// sample using its own timestamp and rotate X/Z through the current phone
-// orientation before the next WebSocket frame consumes it.
-let gyroDelta = null;
-let lastMotionAt = null;
-
-function resetGyroDelta() {
-  gyroDelta = null;
-  lastMotionAt = null;
-}
-
-function emptyGyroDelta() {
-  return {
-    alpha: 0, beta: 0, gamma: 0,
-    local_alpha: 0, local_beta: 0, local_gamma: 0,
-    sample_ms: 0,
-  };
-}
 const calibrated = {}; // corner -> raw Euler angles
 
 // --------------------------- utilities -------------------------------
@@ -296,20 +278,13 @@ window.addEventListener("online", reconnectNow);
 
 // ------------------- sensor permission (iOS gesture) -----------------
 async function requestSensors() {
-  const reqs = [];
   if (typeof DeviceOrientationEvent !== "undefined" &&
       typeof DeviceOrientationEvent.requestPermission === "function") {
-    reqs.push(DeviceOrientationEvent.requestPermission().catch(() => "denied"));
+    await DeviceOrientationEvent.requestPermission().catch(() => "denied");
   }
-  if (typeof DeviceMotionEvent !== "undefined" &&
-      typeof DeviceMotionEvent.requestPermission === "function") {
-    reqs.push(DeviceMotionEvent.requestPermission().catch(() => "denied"));
-  }
-  // Must be triggered synchronously from the tap; awaiting the result is fine.
-  await Promise.all(reqs);
   attachSensors();
 }
-// Ask for motion access exactly once, on the first mode tap (the iOS gesture).
+// Ask for orientation access exactly once, on the first mode tap (the iOS gesture).
 // iOS only prompts the first time; later calls resolve silently.
 let sensorsRequested = false;
 async function ensureSensors() {
@@ -325,49 +300,10 @@ function attachSensors() {
     if (e.beta != null) orient.beta = e.beta;
     if (e.gamma != null) orient.gamma = e.gamma;
   }, true);
-  window.addEventListener("devicemotion", (e) => {
-    const r = e.rotationRate;
-    if (r && r.alpha != null && r.beta != null && r.gamma != null) {
-      const now = performance.now();
-      let dt = lastMotionAt == null ? Number(e.interval) / 1000 : (now - lastMotionAt) / 1000;
-      lastMotionAt = now;
-
-      // Ignore the first/late sample instead of integrating a browser pause.
-      if (!Number.isFinite(dt) || dt <= 0 || dt > 0.05 ||
-          orient.beta == null || orient.gamma == null) return;
-
-      const beta = orient.beta * Math.PI / 180;
-      const gamma = orient.gamma * Math.PI / 180;
-      const sinG = Math.sin(gamma);
-      const cosG = Math.cos(gamma);
-      const cosB = Math.cos(beta);
-      const safeCosB = Math.sign(cosB || 1) * Math.max(Math.abs(cosB), 0.25);
-
-      // rotationRate uses the opposite positive direction from the Euler
-      // orientation deltas observed on iOS. Convert the device-local angular
-      // velocity (X=beta, Z=alpha) into unrolled Euler-like cursor axes.
-      const localAlpha = -r.alpha * dt;
-      const localBeta = -r.beta * dt;
-      const localGamma = -r.gamma * dt;
-      const alpha = (-sinG * localBeta + cosG * localAlpha) / safeCosB;
-      const betaDelta = cosG * localBeta + sinG * localAlpha;
-
-      if (gyroDelta == null) {
-        gyroDelta = emptyGyroDelta();
-      }
-      gyroDelta.alpha += alpha;
-      gyroDelta.beta += betaDelta;
-      gyroDelta.gamma += localGamma;
-      gyroDelta.local_alpha += localAlpha;
-      gyroDelta.local_beta += localBeta;
-      gyroDelta.local_gamma += localGamma;
-      gyroDelta.sample_ms += dt * 1000;
-    }
-  }, true);
 }
 
 // Connect as soon as the page loads — the address is already correct, so there's
-// nothing to type. (Motion permission still needs a tap; that happens on the
+// nothing to type. (Orientation permission still needs a tap; that happens on the
 // mode buttons below.)
 connect();
 
@@ -375,7 +311,6 @@ connect();
 $("modeRelative").addEventListener("click", async () => {
   mode = "relative";
   await ensureSensors();
-  resetGyroDelta();
   send({ t: "mode", mode: "relative" });
   startControl();
 });
@@ -548,22 +483,12 @@ control.addEventListener("touchcancel", endTouch, { passive: false });
 function streamLoop() {
   if (screen === "control" && connected && !suppressMove &&
       orient.alpha != null && orient.beta != null) {
-    const gyroFresh = lastMotionAt != null && performance.now() - lastMotionAt < 150;
-    // A display can refresh faster than DeviceMotion. Send a zero gyro frame
-    // between samples instead of briefly falling back to coupled Euler deltas.
-    const frameGyroDelta = mode === "relative" && gyroFresh
-      ? (gyroDelta ?? emptyGyroDelta()) : null;
-    gyroDelta = null;
     send({
       t: "move",
       beta: orient.beta,
       alpha: orient.alpha,
       gamma: orient.gamma ?? 0,
-      rotation_delta: frameGyroDelta,
     });
-  } else {
-    // Never replay motion collected while disconnected, scrolling or hidden.
-    gyroDelta = null;
   }
   requestAnimationFrame(streamLoop);
 }

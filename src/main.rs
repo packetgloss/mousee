@@ -1,4 +1,4 @@
-//! mousee — control your PC mouse from a phone via its gyroscope.
+//! mousee — control your PC mouse from phone orientation sensors.
 //! One Rust binary (HTML client embedded), one TCP port for page + WebSocket.
 //!
 //! Release process model on Windows: the interactive launcher (this console)
@@ -30,7 +30,7 @@ use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
-#[command(name = "mousee", version, about = "Phone gyroscope -> PC mouse")]
+#[command(name = "mousee", version, about = "Phone orientation -> PC mouse")]
 struct Args {
     /// Force a specific LAN-IP (skips autodetection & interface picker).
     #[arg(long)]

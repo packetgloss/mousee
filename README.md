@@ -130,12 +130,9 @@ All knobs are explicit constants at the top of the files:
 - **Linux/Wayland:** input injection (`enigo`) is restricted under Wayland; X11
   works. Primary target is Windows. The tray (`tray-icon` + `tao`) is also best
   tested on Windows; disable with `--no-default-features` if it fails to build.
-- Relative mode integrates every `DeviceMotionEvent.rotationRate` sample using
-  its own timestamp, then uses the current beta/gamma orientation to rotate the
-  phone-local axes into stable horizontal/vertical cursor axes. Gamma changes
-  the coordinate transform but never moves or suppresses the cursor by itself.
-  Browsers without rotation-rate data fall back to orientation deltas. Large
-  frame deltas pass through a direction-preserving `asinh` compressor, followed
-  by a 1€ filter.
+- Relative mode uses consecutive `DeviceOrientationEvent` alpha/beta deltas.
+  Gamma is logged for diagnostics but does not move, suppress, or recalibrate
+  the cursor. Large frame deltas pass through a direction-preserving `asinh`
+  compressor, followed by a 1€ filter.
 - Absolute horizontal can still inherit compass/magnetometer drift and therefore
   needs calibration.

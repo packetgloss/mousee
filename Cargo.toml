@@ -2,7 +2,7 @@
 name = "mousee"
 version = "0.1.0"
 edition = "2021"
-description = "Control your PC mouse from a phone via its gyroscope (single static binary)"
+description = "Control your PC mouse from phone orientation sensors (single static binary)"
 license = "MIT"
 
 [[bin]]
