@@ -1,0 +1,83 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Verify tag matches Cargo version
+        id: version
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}" -replace '^v', ''
+          $manifest = Get-Content -Raw Cargo.toml
+          $match = [regex]::Match($manifest, '(?m)^version\s*=\s*"([^"]+)"')
+          if (-not $match.Success) { throw "Cargo package version not found" }
+          $cargoVersion = $match.Groups[1].Value
+          if ($version -ne $cargoVersion) {
+            throw "Tag version $version does not match Cargo version $cargoVersion"
+          }
+          "value=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Verify source
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --all-targets --all-features --locked -- -D warnings
+          cargo test --all-features --locked
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Package release
+        id: package
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.value }}"
+          $name = "mousee-v$version-windows-x86_64"
+          $folder = Join-Path dist $name
+          New-Item -ItemType Directory -Path $folder -Force | Out-Null
+          Copy-Item target/release/mousee.exe, README.md, LICENSE -Destination $folder
+
+          $archive = "dist/$name.zip"
+          Compress-Archive -Path "$folder/*" -DestinationPath $archive
+          $checksum = "$archive.sha256"
+          $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          "$hash  $name.zip" | Set-Content -Encoding ascii $checksum
+
+          "archive=$archive" >> $env:GITHUB_OUTPUT
+          "checksum=$checksum" >> $env:GITHUB_OUTPUT
+
+      - name: Attest release archive
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: ${{ steps.package.outputs.archive }}
+
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = "${{ steps.version.outputs.value }}"
+          gh release create $tag `
+            "${{ steps.package.outputs.archive }}" `
+            "${{ steps.package.outputs.checksum }}" `
+            --draft --verify-tag --generate-notes --title "mousee $version"
+          gh release edit $tag --draft=false --latest

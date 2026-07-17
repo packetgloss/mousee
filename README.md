@@ -12,6 +12,12 @@ on the PC, which moves the system cursor.
   into the binary at build time via `include_str!`.
 - **Server** — one Rust binary (`mousee`). No external runtime, no system OpenSSL.
 
+## Download
+
+Download the Windows x86-64 archive and SHA-256 checksum from the
+[latest GitHub release](https://github.com/packetgloss/mousee/releases/latest).
+The archive contains the standalone `mousee.exe`; no installer is required.
+
 ## Build
 
 Requires a Rust toolchain (stable). On Windows install via

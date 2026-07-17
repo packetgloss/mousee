@@ -1,9 +1,10 @@
 [package]
 name = "mousee"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "Control your PC mouse from phone orientation sensors (single static binary)"
 license = "MIT"
+repository = "https://github.com/packetgloss/mousee"
 
 [[bin]]
 name = "mousee"
