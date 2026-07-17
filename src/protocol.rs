@@ -34,7 +34,13 @@ pub enum ClientMsg {
     /// Switch between absolute / relative.
     Mode { mode: Mode },
     /// Store current orientation for a screen corner.
-    Calib { point: Corner, beta: f64, alpha: f64 },
+    Calib {
+        point: Corner,
+        beta: f64,
+        alpha: f64,
+        #[serde(default)]
+        gamma: f64,
+    },
     /// Clear all calibration points.
     ResetCalib,
     /// Main orientation stream (~60 Hz).
@@ -43,18 +49,43 @@ pub enum ClientMsg {
         alpha: f64,
         #[serde(default)]
         gamma: f64,
-        /// accelerationIncludingGravity [x, y, z], used only for anti-jitter.
-        #[serde(default)]
-        accel: Option<[f64; 3]>,
     },
+    /// Apply coefficients learned during an explicit phone-roll calibration.
+    GammaCalib {
+        alpha_coupling: f64,
+        beta_coupling: f64,
+    },
+    /// Disable the optional gamma compensation.
+    ResetGammaCalib,
     /// Press a mouse button (hold).
     Down { button: Btn },
     /// Release a mouse button.
     Up { button: Btn },
     /// Wheel scroll; `dy` is a small signed tick count.
     Scroll { dy: f64 },
-    /// Toggle dynamic anti-jitter.
-    AntiJitter { on: bool },
-    /// Smoothing slider value (0..1].
+    /// Filter response (0..1]; the UI exposes the inverse as smoothing amount.
     Smoothing { value: f64 },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gamma_calibration_message_uses_expected_wire_names() {
+        let message: ClientMsg = serde_json::from_str(
+            r#"{"t":"gamma_calib","alpha_coupling":-0.25,"beta_coupling":0.4}"#,
+        )
+        .unwrap();
+        match message {
+            ClientMsg::GammaCalib {
+                alpha_coupling,
+                beta_coupling,
+            } => {
+                assert_eq!(alpha_coupling, -0.25);
+                assert_eq!(beta_coupling, 0.4);
+            }
+            _ => panic!("wrong message variant"),
+        }
+    }
 }

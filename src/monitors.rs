@@ -71,8 +71,16 @@ impl Layout {
     fn from_monitors(monitors: Vec<Monitor>) -> Self {
         let origin_x = monitors.iter().map(|m| m.x).min().unwrap_or(0);
         let origin_y = monitors.iter().map(|m| m.y).min().unwrap_or(0);
-        let max_x = monitors.iter().map(|m| m.x + m.w).max().unwrap_or(config::FALLBACK_WIDTH);
-        let max_y = monitors.iter().map(|m| m.y + m.h).max().unwrap_or(config::FALLBACK_HEIGHT);
+        let max_x = monitors
+            .iter()
+            .map(|m| m.x + m.w)
+            .max()
+            .unwrap_or(config::FALLBACK_WIDTH);
+        let max_y = monitors
+            .iter()
+            .map(|m| m.y + m.h)
+            .max()
+            .unwrap_or(config::FALLBACK_HEIGHT);
         Self {
             origin_x,
             origin_y,
@@ -114,7 +122,13 @@ impl Layout {
             self.monitors.len()
         );
         for (i, m) in self.monitors.iter().enumerate() {
-            tracing::info!("  monitor #{i}: pos=({}, {}) size={}x{}", m.x, m.y, m.w, m.h);
+            tracing::info!(
+                "  monitor #{i}: pos=({}, {}) size={}x{}",
+                m.x,
+                m.y,
+                m.w,
+                m.h
+            );
         }
     }
 }

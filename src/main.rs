@@ -1,12 +1,13 @@
 //! mousee — control your PC mouse from a phone via its gyroscope.
 //! One Rust binary (HTML client embedded), one TCP port for page + WebSocket.
 //!
-//! Process model on Windows: the interactive launcher (this console) picks the
-//! interface, prints the QR, then spawns a **detached, console-less background
-//! worker** (`--background`) that runs the server + tray. Closing the launcher
-//! console therefore does not kill the running app — it lives in the tray until
-//! you choose Quit there.
+//! Release process model on Windows: the interactive launcher (this console)
+//! picks the interface, prints the QR, then spawns a detached, console-less
+//! background worker (`--background`) that runs the server + tray. Debug builds
+//! always stay in one foreground process so logs and Ctrl-C behave normally.
 
+#[cfg(all(windows, feature = "tray"))]
+mod autostart;
 mod config;
 mod instance;
 mod monitors;
@@ -51,7 +52,7 @@ struct Args {
     #[arg(long)]
     no_tray: bool,
 
-    /// Verbose, throttled per-frame mapping logs.
+    /// Verbose sensor/mapping logs; also stay in the foreground without a tray.
     #[arg(long)]
     debug: bool,
 
@@ -62,11 +63,24 @@ struct Args {
 
 fn init_logging(debug: bool) {
     let level = if debug { "mousee=debug" } else { "mousee=info" };
+    let mut filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
+    if debug {
+        // A machine-wide `RUST_LOG=warn` must not make a development launch
+        // silently lose the coordinate diagnostics it promises.
+        filter = filter.add_directive("mousee=debug".parse().expect("valid log directive"));
+    }
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level)))
+        .with_env_filter(filter)
         .with_target(false)
         .without_time()
         .init();
+}
+
+/// Only interactive release launches use the detached worker + tray model.
+/// Development and explicit diagnostic/headless modes remain foreground-only.
+#[cfg(all(windows, feature = "tray"))]
+fn use_background_worker(args: &Args) -> bool {
+    !cfg!(debug_assertions) && !args.debug && !args.no_tray && !args.yes
 }
 
 /// Build the runtime, start the server, return the runtime + connection flag +
@@ -100,7 +114,7 @@ fn start_server(
     let ctx = server::Ctx {
         layout,
         mouse_tx,
-        debug: args.debug,
+        debug: args.debug || cfg!(debug_assertions),
         connected: connected.clone(),
     };
     let port = args.port;
@@ -123,7 +137,12 @@ fn run_worker(args: Args) -> Result<()> {
         None => return Ok(()),
     };
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let ip = args.ip.unwrap_or(Ipv4Addr::LOCALHOST);
+    let preferred = args
+        .ip
+        .or_else(|| config::PREFERRED_IP.and_then(|s| s.parse().ok()));
+    let ip = preferred
+        .or_else(|| net::candidates().first().map(|candidate| candidate.ip))
+        .unwrap_or(Ipv4Addr::LOCALHOST);
     let (_rt, _connected, _scheme) = start_server(&args, ip)?;
 
     #[cfg(feature = "tray")]
@@ -181,7 +200,8 @@ fn main() -> Result<()> {
 
     // Detached background worker has no console, so it installs no log
     // subscriber: logging is foreground-only by design (use --no-tray to see it).
-    if args.background {
+    if args.background && !cfg!(debug_assertions) {
+        instance::hide_console();
         return run_worker(args);
     }
 
@@ -189,12 +209,15 @@ fn main() -> Result<()> {
     // second one. Do this *before* any console output so we can hide the window
     // and show only the native notice.
     #[cfg(all(windows, feature = "tray"))]
-    if !args.no_tray && instance::is_running() {
+    if use_background_worker(&args) && instance::is_running() {
         instance::warn_already_running();
         return Ok(());
     }
 
-    init_logging(args.debug);
+    // `cargo run` is a development tool: debug builds are always verbose and
+    // stay in this process. A release build can opt into the same behavior with
+    // --debug, which also prevents a detached/tray worker below.
+    init_logging(args.debug || cfg!(debug_assertions));
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     // Pick the LAN-IP, then make sure a cert exists so the QR can show the right
@@ -218,6 +241,13 @@ fn main() -> Result<()> {
     };
     let url = format!("{scheme}://{ip}:{}", args.port);
 
+    #[cfg(all(windows, feature = "tray"))]
+    if use_background_worker(&args) {
+        if let Err(e) = autostart::prompt() {
+            tracing::warn!("could not configure Windows autostart: {e}");
+        }
+    }
+
     println!("\n  mousee — page + WebSocket on 0.0.0.0:{}", args.port);
     tui::print_qr(&url);
 
@@ -225,7 +255,7 @@ fn main() -> Result<()> {
     // so this console is disposable — close it with the X and the tray lives on.
     #[cfg(all(windows, feature = "tray"))]
     {
-        if !args.no_tray && !args.yes {
+        if use_background_worker(&args) {
             spawn_worker(&args, ip)?;
             println!("  mousee is now running in the background — see the tray icon.");
             println!("  You can CLOSE THIS WINDOW; the app keeps running in the tray.");

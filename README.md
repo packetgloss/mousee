@@ -27,6 +27,7 @@ the HTML client is baked in.
 ## Run
 
 ```powershell
+cargo run                    # debug: foreground logs, no tray, Ctrl-C stops all
 cargo run --release          # interactive: pick interface, prints a QR code
 .\target\release\mousee.exe  # same, from the built binary
 ```
@@ -35,14 +36,23 @@ On start the server:
 
 1. reads the monitor layout and computes the virtual desktop (logged);
 2. lets you pick the network interface (arrow keys, recommended one preselected);
-3. generates/loads a self-signed TLS certificate for the chosen IP (cached in
-   the per-user data dir — `%LOCALAPPDATA%\mousee` on Windows,
-   `$XDG_DATA_HOME`/`$HOME` elsewhere — and reissued when the IP changes);
+3. generates/loads a stable local root CA plus a CA-signed TLS certificate for
+   the current LAN addresses (cached in the per-user data dir —
+   `%LOCALAPPDATA%\mousee` on Windows, `$XDG_DATA_HOME`/`$HOME` elsewhere);
 4. binds `0.0.0.0:<port>` for **both** the page and the WebSocket;
 5. prints a QR code with `https://<ip>:<port>`.
 
-Scan the QR with your phone, **accept the self-signed certificate once**, tap
-**Connect** (this grants motion sensors on iOS), then pick a mode.
+Scan the QR with your phone. Before the root CA is installed, Safari will show a
+local-certificate warning; the page then connects on its own (no address to
+type), and you just **pick a mode**. On iOS the first mode tap is what grants
+motion-sensor access.
+
+Safari's “visit this website” exception is temporary. For permanent local trust,
+expand **iPhone keeps showing certificate warnings?** on the mode screen,
+download the stable `mousee local root CA`, install it under **Settings → General
+→ VPN & Device Management**, then enable it under **General → About → Certificate
+Trust Settings**. Install this root only from your own PC. The CA remains stable
+when mousee renews an IP certificate or the LAN address changes.
 
 ### Flags
 
@@ -53,12 +63,12 @@ Scan the QR with your phone, **accept the self-signed certificate once**, tap
 | `--yes` / `--no-tui` | Headless: use the recommended/forced IP, no picker, no tray. |
 | `--no-tls` | Serve plain HTTP (⚠ iOS will **not** grant sensors). |
 | `--no-tray` | Don't show the tray icon; run in the foreground until Ctrl-C. |
-| `--debug` | Verbose, throttled per-frame mapping logs (foreground / `--no-tray` only). |
+| `--debug` | Verbose sensor/mapping logs and foreground mode (no tray). |
 
 ## System tray & background (Windows)
 
-Closing a console window kills its process — Windows offers no way around that.
-So mousee uses two processes:
+Release builds use two processes so closing the launcher does not kill the tray
+application:
 
 1. The **launcher** (this console) picks the interface, prints the QR, then
    spawns…
@@ -78,11 +88,17 @@ Tray menu:
 The tooltip switches between "waiting for phone" and "phone connected".
 
 The background worker has no console of its own and so emits **no logs**: logging
-is foreground-only. Use `--no-tray` to instead stay in the foreground (server +
-logs in this console, Ctrl-C to quit) — handy for debugging or running under a
-service manager.
+is foreground-only. A normal `cargo run` (debug profile) automatically stays in
+the foreground, enables throttled raw/derived coordinate logs, creates no tray
+icon, and exits the whole application on Ctrl-C. For a release binary, use
+`--debug` or `--no-tray` to get foreground behavior.
 Build without it via `cargo build --release --no-default-features` (or run with
 `--no-tray`).
+
+On an interactive release launch, mousee also asks whether it should start when
+you sign in to Windows. The default is **No, not now**; you can permanently hide
+the question or add the current executable to the per-user Windows autostart
+entry (no administrator rights required).
 
 ## Modes
 
@@ -91,6 +107,13 @@ Build without it via `cargo build --release --no-default-features` (or run with
 - **Absolute** — aim maps directly to the screen after a 4-corner calibration.
   Horizontal spans the whole virtual desktop; vertical is stretched over the real
   monitor under the pointer (no dead zones on mixed-height multi-monitor setups).
+- **Phone-roll calibration (optional)** — hold the usual aiming pose and roll
+  the phone left/right for 2.5 seconds. The resulting gamma coupling is frozen
+  for the session and replayed after reconnects; normal aiming never retrains it.
+
+Smoothing is always active in both modes. The phone slider shows the actual
+amount of smoothing: right is steadier, left is more responsive. Its default
+65% maps to the existing internal response of 0.35.
 
 ## Gestures (control screen)
 
@@ -111,6 +134,12 @@ All knobs are explicit constants at the top of the files:
 - **Linux/Wayland:** input injection (`enigo`) is restricted under Wayland; X11
   works. Primary target is Windows. The tray (`tray-icon` + `tao`) is also best
   tested on Windows; disable with `--no-default-features` if it fails to build.
-- **Autostart at login** is not wired up; the tray itself is.
-- `alpha` is a compass/magnetometer reading: absolute horizontal is inherently
-  less stable than relative and needs calibration. This is hardware, not a bug.
+- Relative mode uses raw `alpha`/`beta` unless the optional phone-roll
+  calibration is active. `gamma` is never learned from live aiming because
+  natural circular gestures correlate all three Euler angles. Large frame
+  deltas pass through a direction-preserving `asinh` compressor: normal aiming
+  stays controlled while a strong flick can still cross monitors. A 1€ filter
+  smooths the trajectory at low speed while allowing fast deliberate movement
+  through with less lag.
+- Absolute horizontal can still inherit compass/magnetometer drift and therefore
+  needs calibration.

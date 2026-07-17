@@ -11,7 +11,7 @@ pub const DEFAULT_PORT: u16 = 8081;
 pub const PREFERRED_IP: Option<&str> = None;
 
 /// Sub-folder name (under %LOCALAPPDATA% on Windows, or the OS data dir
-/// elsewhere) where the cached self-signed cert/key/ip live. See `tls::dir`.
+/// elsewhere) where the cached local CA and server cert/key live. See `tls::dir`.
 pub const CERT_DIR: &str = "mousee";
 
 // ---------------------------------------------------------------------------
@@ -24,17 +24,12 @@ pub const SCROLL_SENSITIVITY: i32 = 1;
 pub const SCROLL_SIGN: i32 = -1;
 
 // ---------------------------------------------------------------------------
-// Absolute mode smoothing / anti-jitter (SPEC §5.1)
+// Always-on smoothing (SPEC §5.1)
 // ---------------------------------------------------------------------------
 
 /// Smoothing factor used when the phone has not sent a slider value yet.
 /// Lower = lazier/smoother, higher = snappier. Range (0..1].
 pub const DEFAULT_SMOOTHING: f64 = 0.35;
-
-/// Anti-jitter: |accel_magnitude - 9.8| above this (m/s²) is considered shaking.
-pub const ANTIJITTER_THRESHOLD: f64 = 2.5;
-/// Smoothing factor forced for a frame detected as "shaking" (stronger smoothing).
-pub const ANTIJITTER_SMOOTHING: f64 = 0.08;
 
 // ---------------------------------------------------------------------------
 // Relative / air-mouse mode (SPEC §5.2)
@@ -54,6 +49,20 @@ pub const REL_ACCEL: f64 = 0.4;
 /// Per-frame dead zone in degrees; movement below this is ignored (kills drift).
 /// Keep small so slow circular motion is not chewed up.
 pub const REL_DEADZONE: f64 = 0.08;
+/// Ignore accumulated orientation changes after the browser/network has paused
+/// this long. Re-priming is preferable to a resume jump across the desktop.
+pub const TRACKING_GAP_MS: u64 = 250;
+/// Scale of the radial asinh compressor. Small movement stays nearly linear;
+/// large movement is compressed but remains unbounded, preserving fast flicks.
+pub const REL_COMPRESSION_SCALE_PX: f64 = 30.0;
+/// Frozen gamma coupling is clamped to keep a bad calibration recoverable.
+pub const GAMMA_CALIB_MAX_COUPLING: f64 = 2.0;
+
+/// 1€ adaptive low-pass parameters. At slow movement the filter matches the
+/// existing smoothing slider; speed raises the cutoff to avoid added latency.
+pub const ONE_EURO_BETA: f64 = 0.02;
+pub const ONE_EURO_DERIVATIVE_CUTOFF_HZ: f64 = 1.0;
+pub const FILTER_REFERENCE_HZ: f64 = 60.0;
 /// Axis sign for horizontal (alpha). Flip to mirror left/right.
 pub const REL_SIGN_X: f64 = -1.0;
 /// Axis sign for vertical (beta). Usually inverted so "aim lower => cursor lower".

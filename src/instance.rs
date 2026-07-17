@@ -17,7 +17,10 @@ mod imp {
     const NAME: &str = "Local\\mousee-singleton-9e1c4f";
 
     fn wide(s: &str) -> Vec<u16> {
-        OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+        OsStr::new(s)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
     }
 
     /// Keeps the singleton mutex alive for the lifetime of the process.
@@ -54,6 +57,7 @@ mod imp {
 
     /// Non-owning check: is another instance already running? (Acquires and then
     /// immediately releases our own handle, so it never keeps the mutex alive.)
+    #[cfg(feature = "tray")]
     pub fn is_running() -> bool {
         acquire().is_none()
     }
@@ -61,6 +65,7 @@ mod imp {
     /// Native "already running" notification: a standard Windows message box.
     /// Hides this launcher's console window first, so the *only* thing the user
     /// sees is the dialog (the console would otherwise flash behind it).
+    #[cfg(feature = "tray")]
     pub fn warn_already_running() {
         use windows_sys::Win32::System::Console::GetConsoleWindow;
         use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -86,6 +91,19 @@ mod imp {
             );
         }
     }
+
+    /// A worker started from the Windows Run registry inherits a console window
+    /// because mousee is a console executable. Hide it before doing any work.
+    pub fn hide_console() {
+        use windows_sys::Win32::System::Console::GetConsoleWindow;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+        unsafe {
+            let console = GetConsoleWindow();
+            if !console.is_null() {
+                ShowWindow(console, SW_HIDE);
+            }
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -94,12 +112,9 @@ mod imp {
     pub fn acquire() -> Option<Guard> {
         Some(Guard)
     }
-    pub fn is_running() -> bool {
-        false
-    }
-    pub fn warn_already_running() {
-        eprintln!("mousee is already running.");
-    }
+    pub fn hide_console() {}
 }
 
-pub use imp::{acquire, is_running, warn_already_running};
+pub use imp::{acquire, hide_console};
+#[cfg(all(windows, feature = "tray"))]
+pub use imp::{is_running, warn_already_running};

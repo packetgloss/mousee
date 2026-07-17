@@ -71,6 +71,6 @@ pub fn print_qr(url: &str) {
 
     println!("  Scan the QR with your phone camera, or open:");
     println!("      {url}\n");
-    println!("  The certificate is self-signed: your phone will warn it is");
-    println!("  \"not secure\" — accept it once to continue.\n");
+    println!("  TLS uses mousee's local root CA. Until it is trusted, your phone");
+    println!("  will show a security warning; the page explains permanent setup.\n");
 }

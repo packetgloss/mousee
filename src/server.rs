@@ -42,11 +42,7 @@ pub struct Ctx {
 }
 
 /// Bind and serve forever. `tls` is `None` when running in plain-HTTP fallback.
-pub async fn run(
-    port: u16,
-    tls: Option<Arc<rustls::ServerConfig>>,
-    ctx: Ctx,
-) -> Result<()> {
+pub async fn run(port: u16, tls: Option<Arc<rustls::ServerConfig>>, ctx: Ctx) -> Result<()> {
     let addr: SocketAddr = ([0, 0, 0, 0], port).into();
     let listener = TcpListener::bind(addr)
         .await
@@ -112,6 +108,10 @@ where
             }
             Some(p) if p.starts_with("/apple-touch-icon") => {
                 serve_bytes(&mut stream, "image/png", "max-age=86400", APPLE_TOUCH_PNG).await
+            }
+            Some(p) if p.starts_with("/mousee-ca.cer") => {
+                let ca = crate::tls::ca_der()?;
+                serve_bytes(&mut stream, "application/x-x509-ca-cert", "no-store", &ca).await
             }
             _ => {
                 serve_bytes(

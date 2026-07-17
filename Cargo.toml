@@ -20,7 +20,7 @@ rustls = { version = "0.23", default-features = false, features = ["std", "tls12
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 rustls-pemfile = "2"
 
-# self-signed certificate generation (pure Rust)
+# local CA + server certificate generation (pure Rust)
 rcgen = { version = "0.13", features = ["pem"] }
 time = "0.3"
 
@@ -54,6 +54,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_Threading",
     "Win32_System_Console",
+    "Win32_System_Registry",
     "Win32_UI_WindowsAndMessaging",
 ] }
 
@@ -66,6 +67,9 @@ tray = ["dep:tray-icon", "dep:tao"]
 image = { version = "0.25", default-features = false, features = ["png"] }
 ico = "0.3"
 winresource = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
 
 [profile.release]
 opt-level = "z"

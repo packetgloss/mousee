@@ -18,13 +18,100 @@ struct Bounds {
     alpha_right: f64,
 }
 
+#[derive(Debug, Default)]
+struct LowPass {
+    value: Option<f64>,
+}
+
+impl LowPass {
+    fn filter(&mut self, input: f64, alpha: f64) -> f64 {
+        let output = self
+            .value
+            .map_or(input, |previous| previous + alpha * (input - previous));
+        self.value = Some(output);
+        output
+    }
+
+    fn reset(&mut self) {
+        self.value = None;
+    }
+}
+
+#[derive(Debug, Default)]
+struct OneEuroAxis {
+    signal: LowPass,
+    derivative: LowPass,
+    previous_raw: Option<f64>,
+    integrated_input: f64,
+    previous_output: f64,
+}
+
+impl OneEuroAxis {
+    /// Filter an input delta by integrating it to a trajectory, applying the
+    /// standard 1€ position filter, then differentiating the filtered result.
+    /// This makes the adaptive derivative represent movement speed.
+    fn filter_delta(&mut self, delta: f64, dt: Duration, min_cutoff_hz: f64) -> f64 {
+        let seconds = dt.as_secs_f64().max(1.0 / 1000.0);
+        self.integrated_input += delta;
+        let raw_derivative = self
+            .previous_raw
+            .map_or(0.0, |previous| (self.integrated_input - previous) / seconds);
+        self.previous_raw = Some(self.integrated_input);
+
+        let derivative = self.derivative.filter(
+            raw_derivative,
+            low_pass_alpha(config::ONE_EURO_DERIVATIVE_CUTOFF_HZ, seconds),
+        );
+        let cutoff = min_cutoff_hz + config::ONE_EURO_BETA * derivative.abs();
+        // Relative velocity starts at rest. Seeding the signal with zero makes
+        // the first response match the old EMA instead of passing it raw.
+        if self.signal.value.is_none() {
+            self.signal.value = Some(0.0);
+        }
+        let filtered_position = self
+            .signal
+            .filter(self.integrated_input, low_pass_alpha(cutoff, seconds));
+        let output_delta = filtered_position - self.previous_output;
+        self.previous_output = filtered_position;
+        output_delta
+    }
+
+    fn reset(&mut self) {
+        self.signal.reset();
+        self.derivative.reset();
+        self.previous_raw = None;
+        self.integrated_input = 0.0;
+        self.previous_output = 0.0;
+    }
+}
+
+#[derive(Debug, Default)]
+struct OneEuro2D {
+    x: OneEuroAxis,
+    y: OneEuroAxis,
+}
+
+impl OneEuro2D {
+    fn filter(&mut self, input: (f64, f64), dt: Duration, min_cutoff_hz: f64) -> (f64, f64) {
+        (
+            self.x.filter_delta(input.0, dt, min_cutoff_hz),
+            self.y.filter_delta(input.1, dt, min_cutoff_hz),
+        )
+    }
+
+    fn reset(&mut self) {
+        self.x.reset();
+        self.y.reset();
+    }
+}
+
 pub struct Processor {
     layout: LayoutHandle,
     debug: bool,
 
     mode: Mode,
     smoothing: f64,
-    anti_jitter: bool,
+    gamma_coupling: Option<(f64, f64)>,
 
     // calibration
     calib: HashMap<Corner, (f64, f64)>, // corner -> (beta, alpha)
@@ -37,6 +124,9 @@ pub struct Processor {
     // relative mode state
     prev_alpha: Option<f64>,
     prev_beta: Option<f64>,
+    prev_gamma: Option<f64>,
+    last_sample: Option<Instant>,
+    delta_filter: OneEuro2D,
     vel: (f64, f64),
 
     // throttled logging
@@ -50,7 +140,7 @@ impl Processor {
             debug,
             mode: Mode::Relative, // air-mouse is the recommended default (SPEC §4.2)
             smoothing: config::DEFAULT_SMOOTHING,
-            anti_jitter: false,
+            gamma_coupling: None,
             calib: HashMap::new(),
             bounds: None,
             pos: (0.0, 0.0),
@@ -58,6 +148,9 @@ impl Processor {
             vel: (0.0, 0.0),
             prev_alpha: None,
             prev_beta: None,
+            prev_gamma: None,
+            last_sample: None,
+            delta_filter: OneEuro2D::default(),
             last_log: HashMap::new(),
         }
     }
@@ -67,28 +160,11 @@ impl Processor {
     fn reset_tracking(&mut self) {
         self.prev_alpha = None;
         self.prev_beta = None;
+        self.prev_gamma = None;
+        self.last_sample = None;
+        self.delta_filter.reset();
         self.vel = (0.0, 0.0);
         self.has_pos = false;
-    }
-
-    /// Dynamic anti-jitter: on a frame whose accel magnitude departs from ~9.8
-    /// (a shaky hand), force the smoothing factor down so the tremor is damped
-    /// harder (SPEC §5.1). Returns `base` unchanged when anti-jitter is off,
-    /// there's no accel sample, or the frame is steady. Always lowers, never
-    /// raises, the factor.
-    fn jitter_floor(&self, base: f64, accel: Option<[f64; 3]>) -> f64 {
-        if !self.anti_jitter {
-            return base;
-        }
-        let Some([ax, ay, az]) = accel else {
-            return base;
-        };
-        let jitter = ((ax * ax + ay * ay + az * az).sqrt() - 9.8).abs();
-        if jitter > config::ANTIJITTER_THRESHOLD {
-            base.min(config::ANTIJITTER_SMOOTHING)
-        } else {
-            base
-        }
     }
 
     fn should_log(&mut self, cat: &'static str) -> bool {
@@ -117,17 +193,35 @@ impl Processor {
                 vec![]
             }
             ClientMsg::Smoothing { value } => {
-                self.smoothing = value.clamp(0.01, 1.0);
+                self.smoothing = value.clamp(0.05, 0.95);
                 vec![]
             }
-            ClientMsg::AntiJitter { on } => {
-                self.anti_jitter = on;
-                tracing::info!("anti-jitter -> {on}");
+            ClientMsg::GammaCalib {
+                alpha_coupling,
+                beta_coupling,
+            } => {
+                let max = config::GAMMA_CALIB_MAX_COUPLING;
+                self.gamma_coupling = Some((
+                    alpha_coupling.clamp(-max, max),
+                    beta_coupling.clamp(-max, max),
+                ));
+                let (ka, kb) = self.gamma_coupling.unwrap();
+                tracing::info!("gamma calibration -> k=({ka:.3},{kb:.3})");
                 vec![]
             }
-            ClientMsg::Calib { point, beta, alpha } => {
+            ClientMsg::ResetGammaCalib => {
+                self.gamma_coupling = None;
+                tracing::info!("gamma calibration reset");
+                vec![]
+            }
+            ClientMsg::Calib {
+                point,
+                beta,
+                alpha,
+                gamma,
+            } => {
                 self.calib.insert(point, (beta, alpha));
-                tracing::info!("calib {point:?}: beta={beta:.1} alpha={alpha:.1}");
+                tracing::info!("calib {point:?}: alpha={alpha:.1} beta={beta:.1} gamma={gamma:.1}");
                 self.recompute_bounds();
                 vec![]
             }
@@ -147,7 +241,7 @@ impl Processor {
                     vec![MouseCmd::Scroll(ticks)]
                 }
             }
-            ClientMsg::Move { beta, alpha, accel, .. } => self.on_move(beta, alpha, accel),
+            ClientMsg::Move { beta, alpha, gamma } => self.on_move(beta, alpha, gamma),
         }
     }
 
@@ -186,15 +280,18 @@ impl Processor {
         );
     }
 
-    fn on_move(&mut self, beta: f64, alpha: f64, accel: Option<[f64; 3]>) -> Vec<MouseCmd> {
+    fn on_move(&mut self, beta: f64, alpha: f64, gamma: f64) -> Vec<MouseCmd> {
+        if self.should_log("sensor") {
+            tracing::debug!("sensor: alpha={alpha:.2} beta={beta:.2} gamma={gamma:.2}");
+        }
         match self.mode {
-            Mode::Absolute => self.absolute(beta, alpha, accel),
-            Mode::Relative => self.relative(beta, alpha, accel),
+            Mode::Absolute => self.absolute(beta, alpha),
+            Mode::Relative => self.relative(beta, alpha, gamma),
         }
     }
 
     // --- Absolute (calibrated) mode (SPEC §5.1 + §6) -----------------------
-    fn absolute(&mut self, beta: f64, alpha: f64, accel: Option<[f64; 3]>) -> Vec<MouseCmd> {
+    fn absolute(&mut self, beta: f64, alpha: f64) -> Vec<MouseCmd> {
         let Some(b) = self.bounds else {
             return vec![]; // not calibrated yet
         };
@@ -231,8 +328,9 @@ impl Processor {
         let cy = (cy_f.round() as i32).clamp(mon.y, mon.y + mon.h - 1);
         let target = (cx as f64, cy as f64);
 
-        // EMA smoothing, with dynamic anti-jitter reducing the factor (§5.1).
-        let sf = self.jitter_floor(self.smoothing, accel);
+        // Always-on EMA smoothing. The phone slider exposes the inverse amount,
+        // while this internal factor remains response: lower is smoother.
+        let sf = self.smoothing;
 
         if !self.has_pos {
             self.pos = target;
@@ -255,35 +353,60 @@ impl Processor {
     }
 
     // --- Relative (air-mouse) mode (SPEC §5.2) -----------------------------
-    fn relative(&mut self, beta: f64, alpha: f64, accel: Option<[f64; 3]>) -> Vec<MouseCmd> {
+    fn relative(&mut self, beta: f64, alpha: f64, gamma: f64) -> Vec<MouseCmd> {
+        let now = Instant::now();
         // Need two samples to take a delta; first frame only primes the state.
-        let (Some(pa), Some(pb)) = (self.prev_alpha, self.prev_beta) else {
+        let (Some(prev_alpha), Some(prev_beta), Some(prev_gamma), Some(prev_at)) = (
+            self.prev_alpha,
+            self.prev_beta,
+            self.prev_gamma,
+            self.last_sample,
+        ) else {
             self.prev_alpha = Some(alpha);
             self.prev_beta = Some(beta);
+            self.prev_gamma = Some(gamma);
+            self.last_sample = Some(now);
             return vec![];
         };
 
-        // alpha wraps at 0/360: bring delta into [-180, 180].
-        let mut da = alpha - pa;
-        while da > 180.0 {
-            da -= 360.0;
-        }
-        while da < -180.0 {
-            da += 360.0;
-        }
-        let db = beta - pb;
+        let dt = now.duration_since(prev_at);
         self.prev_alpha = Some(alpha);
         self.prev_beta = Some(beta);
+        self.prev_gamma = Some(gamma);
+        self.last_sample = Some(now);
 
-        let dx = config::REL_SIGN_X * shape(da, config::REL_SENSITIVITY_X);
-        let dy = config::REL_SIGN_Y * shape(db, config::REL_SENSITIVITY_Y);
+        // A locked/backgrounded browser resumes with a large accumulated
+        // orientation delta. Treat the first resumed sample as a new baseline.
+        if dt >= Duration::from_millis(config::TRACKING_GAP_MS) {
+            self.vel = (0.0, 0.0);
+            self.delta_filter.reset();
+            if self.should_log("gap") {
+                tracing::debug!(
+                    "sensor stream resumed after {:.0} ms; tracking re-primed",
+                    dt.as_secs_f64() * 1000.0
+                );
+            }
+            return vec![];
+        }
 
-        // Low-pass the velocity for smoothness. The softness slider drives this
-        // in relative mode (lower = smoother/floatier, higher = snappier).
-        // Anti-jitter, when on, lowers it further on shaky frames.
-        let s = self.jitter_floor(self.smoothing.clamp(0.05, 1.0), accel);
-        self.vel.0 = self.vel.0 * (1.0 - s) + dx * s;
-        self.vel.1 = self.vel.1 * (1.0 - s) + dy * s;
+        // Gamma compensation is learned only during a dedicated roll gesture,
+        // then frozen. Live aiming can never alter these coefficients.
+        let da = wrapped_delta(alpha, prev_alpha);
+        let db = beta - prev_beta;
+        let dg = wrapped_delta(gamma, prev_gamma);
+        let (ka, kb) = self.gamma_coupling.unwrap_or((0.0, 0.0));
+        let corrected = apply_gamma_correction(da, db, dg, (ka, kb));
+        let shaped = (
+            config::REL_SIGN_X * shape(corrected.0, config::REL_SENSITIVITY_X),
+            config::REL_SIGN_Y * shape(corrected.1, config::REL_SENSITIVITY_Y),
+        );
+        let compressed = soft_compress_vector(shaped, config::REL_COMPRESSION_SCALE_PX);
+
+        // 1€ filtering: the slider still defines the familiar slow-movement
+        // response, while fast deliberate input raises the cutoff automatically.
+        let s = self.smoothing;
+        let min_cutoff_hz = smoothing_to_cutoff(s);
+        self.vel = self.delta_filter.filter(compressed, dt, min_cutoff_hz);
 
         let layout = self.layout.current();
         let (ox, oy, w, h) = (
@@ -293,7 +416,7 @@ impl Processor {
             layout.height,
         );
         if !self.has_pos {
-            // Start from the center of the virtual desktop.
+            // Preserve the original relative-mode baseline and feel.
             self.pos = (ox as f64 + w as f64 / 2.0, oy as f64 + h as f64 / 2.0);
             self.has_pos = true;
         }
@@ -308,18 +431,28 @@ impl Processor {
         let out = (self.pos.0.round() as i32, self.pos.1.round() as i32);
 
         if self.should_log("rel") {
-            tracing::debug!("rel: da={da:.2} db={db:.2} v=({:.1},{:.1}) pos=({},{})", self.vel.0, self.vel.1, out.0, out.1);
+            tracing::debug!(
+                "rel: raw_deg=({da:.2},{db:.2},{dg:.2}) corrected=({:.2},{:.2}) k=({ka:.2},{kb:.2}) shaped=({:.1},{:.1}) compressed=({:.1},{:.1}) cutoff_min={min_cutoff_hz:.1}Hz v=({:.1},{:.1}) pos=({},{})",
+                corrected.0,
+                corrected.1,
+                shaped.0,
+                shaped.1,
+                compressed.0,
+                compressed.1,
+                self.vel.0,
+                self.vel.1,
+                out.0,
+                out.1
+            );
         }
 
         vec![MouseCmd::MoveTo(out.0, out.1)]
     }
 }
 
-/// Shaping for a per-frame delta: dead zone, then a *linear base* plus a
-/// velocity-proportional acceleration term. Linear at low speed keeps slow arcs
-/// smooth and precise; the extra term lets a fast flick cover the whole desktop
-/// without huge arm motion. Output px = sens * e * (1 + REL_ACCEL * e), where
-/// `e` is the deadzone-corrected angular speed (deg/frame).
+/// Original per-frame shaping: dead zone, then a *linear base* plus a
+/// velocity-proportional acceleration term. Its constants are intentionally
+/// unchanged because they already had a proven usable feel on the target phone.
 fn shape(d: f64, sensitivity: f64) -> f64 {
     let m = d.abs();
     if m < config::REL_DEADZONE {
@@ -327,4 +460,121 @@ fn shape(d: f64, sensitivity: f64) -> f64 {
     }
     let e = m - config::REL_DEADZONE;
     d.signum() * sensitivity * e * (1.0 + config::REL_ACCEL * e)
+}
+
+/// Radially compress large per-frame motion without changing its direction.
+/// Near zero asinh(x) ~= x, so precision movement keeps the original response.
+/// Unlike tanh, asinh remains unbounded: increasingly fast flicks still produce
+/// increasingly fast cursor travel, but sensor spikes grow only logarithmically.
+fn soft_compress_vector(input: (f64, f64), scale: f64) -> (f64, f64) {
+    let magnitude = input.0.hypot(input.1);
+    if magnitude <= f64::EPSILON {
+        return input;
+    }
+    let compressed_magnitude = scale * (magnitude / scale).asinh();
+    let ratio = compressed_magnitude / magnitude;
+    (input.0 * ratio, input.1 * ratio)
+}
+
+fn wrapped_delta(current: f64, previous: f64) -> f64 {
+    let mut delta = current - previous;
+    while delta > 180.0 {
+        delta -= 360.0;
+    }
+    while delta < -180.0 {
+        delta += 360.0;
+    }
+    delta
+}
+
+fn apply_gamma_correction(
+    alpha_delta: f64,
+    beta_delta: f64,
+    gamma_delta: f64,
+    coupling: (f64, f64),
+) -> (f64, f64) {
+    (
+        alpha_delta - coupling.0 * gamma_delta,
+        beta_delta - coupling.1 * gamma_delta,
+    )
+}
+
+fn low_pass_alpha(cutoff_hz: f64, seconds: f64) -> f64 {
+    let tau = 1.0 / (2.0 * std::f64::consts::PI * cutoff_hz.max(1e-6));
+    1.0 / (1.0 + tau / seconds.max(1e-6))
+}
+
+/// Pick a 1€ minimum cutoff whose response at 60 Hz equals the old EMA slider.
+fn smoothing_to_cutoff(smoothing: f64) -> f64 {
+    let response = smoothing.clamp(0.001, 0.999);
+    let seconds = 1.0 / config::FILTER_REFERENCE_HZ;
+    response / (2.0 * std::f64::consts::PI * seconds * (1.0 - response))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn original_shaping_curve_is_preserved() {
+        assert_eq!(shape(0.05, 35.0), 0.0);
+        let e = 1.0 - config::REL_DEADZONE;
+        assert_eq!(shape(1.0, 35.0), 35.0 * e * (1.0 + config::REL_ACCEL * e));
+    }
+
+    #[test]
+    fn soft_compression_preserves_direction_and_reduces_large_motion() {
+        let input = (60.0, 80.0);
+        let output = soft_compress_vector(input, 30.0);
+        assert!(output.0.hypot(output.1) < input.0.hypot(input.1));
+        assert!(output.0.hypot(output.1) > 30.0);
+        assert!((output.0 / output.1 - input.0 / input.1).abs() < 1e-12);
+    }
+
+    #[test]
+    fn soft_compression_is_nearly_linear_for_precision_motion() {
+        let input = (1.0, -2.0);
+        let output = soft_compress_vector(input, 30.0);
+        assert!((output.0 - input.0).abs() < 0.002);
+        assert!((output.1 - input.1).abs() < 0.003);
+    }
+
+    #[test]
+    fn soft_compression_keeps_fast_flicks_distinguishable() {
+        let medium = soft_compress_vector((100.0, 0.0), 30.0).0;
+        let fast = soft_compress_vector((500.0, 0.0), 30.0).0;
+        assert!(medium > 50.0, "{medium}");
+        assert!(fast > 100.0, "{fast}");
+        assert!(fast > medium, "{fast} <= {medium}");
+    }
+
+    #[test]
+    fn one_euro_matches_old_ema_at_reference_speed_then_reacts_faster() {
+        let dt = Duration::from_secs_f64(1.0 / config::FILTER_REFERENCE_HZ);
+        let cutoff = smoothing_to_cutoff(0.35);
+        let mut slow = OneEuroAxis::default();
+        let first = slow.filter_delta(10.0, dt, cutoff);
+        assert!((first - 3.5).abs() < 1e-6, "{first}");
+
+        let mut fast = OneEuroAxis::default();
+        let _ = fast.filter_delta(0.0, dt, cutoff);
+        let accelerated = fast.filter_delta(10.0, dt, cutoff);
+        assert!(accelerated > first, "{accelerated} <= {first}");
+    }
+
+    #[test]
+    fn angular_delta_handles_wraparound() {
+        assert_eq!(wrapped_delta(1.0, 359.0), 2.0);
+        assert_eq!(wrapped_delta(359.0, 1.0), -2.0);
+    }
+
+    #[test]
+    fn frozen_gamma_calibration_removes_only_calibrated_coupling() {
+        let corrected = apply_gamma_correction(-0.3, 0.8, 1.0, (-0.3, 0.2));
+        assert!(corrected.0.abs() < 1e-12);
+        assert!((corrected.1 - 0.6).abs() < 1e-12);
+
+        let aim_without_roll = apply_gamma_correction(0.7, -0.4, 0.0, (-0.3, 0.2));
+        assert_eq!(aim_without_roll, (0.7, -0.4));
+    }
 }

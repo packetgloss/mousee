@@ -1,10 +1,10 @@
 //! Build script: derive every icon target from the single source `src/icon.png`.
 //!
-//!  * `tray.rgba`   — 32x32 raw RGBA, decoded at compile time so the runtime
-//!                    needs no image crate (used by the system-tray icon).
-//!  * `favicon.png` — 48x48 PNG served by the web client.
-//!  * `icon.ico`    — multi-size Windows icon, embedded into the `.exe` so it
-//!                    shows up in Explorer / the taskbar (Windows only).
+//! * `tray.rgba` — 32x32 raw RGBA, decoded at compile time so the runtime needs
+//!   no image crate (used by the system-tray icon).
+//! * `favicon.png` — 48x48 PNG served by the web client.
+//! * `icon.ico` — multi-size Windows icon, embedded into the `.exe` so it shows
+//!   up in Explorer / the taskbar (Windows only).
 
 use std::env;
 use std::path::Path;

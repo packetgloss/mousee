@@ -35,7 +35,9 @@ pub fn candidates() -> Vec<Candidate> {
 
     if let Ok(ifaces) = local_ip_address::list_afinet_netifas() {
         for (name, ip) in ifaces {
-            let std::net::IpAddr::V4(v4) = ip else { continue };
+            let std::net::IpAddr::V4(v4) = ip else {
+                continue;
+            };
             if !v4.is_private() || v4.is_loopback() {
                 continue;
             }
@@ -54,7 +56,11 @@ pub fn candidates() -> Vec<Candidate> {
     // short-circuits before this list is even shown — so there's no override
     // injection here.
 
-    list.sort_by(|a, b| b.score.cmp(&a.score).then(a.ip.octets().cmp(&b.ip.octets())));
+    list.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then(a.ip.octets().cmp(&b.ip.octets()))
+    });
     if let Some(first) = list.first_mut() {
         first.recommended = true;
     }
@@ -63,8 +69,26 @@ pub fn candidates() -> Vec<Candidate> {
 
 fn classify(name: &str, ip: &Ipv4Addr) -> IfKind {
     let n = name.to_lowercase();
-    let virtual_hint = ["virtualbox", "vmware", "vethernet", "hyper-v", "vbox", "default switch", "docker"];
-    let vpn_hint = ["vpn", "wireguard", "wg", "tun", "tap", "openvpn", "proton", "tailscale", "zerotier"];
+    let virtual_hint = [
+        "virtualbox",
+        "vmware",
+        "vethernet",
+        "hyper-v",
+        "vbox",
+        "default switch",
+        "docker",
+    ];
+    let vpn_hint = [
+        "vpn",
+        "wireguard",
+        "wg",
+        "tun",
+        "tap",
+        "openvpn",
+        "proton",
+        "tailscale",
+        "zerotier",
+    ];
 
     // VirtualBox host-only network (SPEC §2.3) is virtual.
     let o = ip.octets();
