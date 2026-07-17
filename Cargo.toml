@@ -26,7 +26,7 @@ rcgen = { version = "0.13", features = ["pem"] }
 time = "0.3"
 
 # input injection + monitor geometry
-enigo = "0.2"
+enigo = "0.6"
 display-info = "0.5"
 
 # serialization
