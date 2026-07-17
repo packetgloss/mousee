@@ -124,7 +124,7 @@ pub fn prompt() -> Result<()> {
     ];
     let selected = Select::with_theme(&ColorfulTheme::default())
         .with_prompt("Start mousee automatically when you sign in to Windows?")
-        .items(&choices)
+        .items(choices)
         .default(0)
         .interact_opt()?
         .unwrap_or(0);
