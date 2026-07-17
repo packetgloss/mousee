@@ -56,8 +56,6 @@
   .range-scale { display:flex; justify-content:space-between; color:var(--muted);
     font-size:11px; margin-top:4px; }
   .value { color:var(--text); font-variant-numeric:tabular-nums; font-size:13px; }
-  .action { background:var(--accent2); border-radius:10px; padding:9px 13px;
-    font-size:13px; font-weight:600; white-space:nowrap; }
   .status { position: fixed; top: 10px; right: 12px; font-size: 12px; color: var(--muted);
     display: flex; align-items: center; gap: 6px; z-index: 50; }
   .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--bad); }
@@ -120,16 +118,7 @@
     <div class="range-scale"><span>Responsive</span><span>Stable</span></div>
   </div>
 
-  <div class="card">
-    <div class="row">
-      <div>
-        <div class="t" style="font-size:15px;">Phone-roll calibration</div>
-        <div id="gammaCalibStatus" class="d">Optional · compensation off</div>
-      </div>
-      <button id="gammaCalibOpen" class="action">Calibrate</button>
-    </div>
-  </div>
-
+  <!--
   <details class="cert-help">
     <summary>iPhone keeps showing certificate warnings?</summary>
     <p>Install the stable mousee root once (only from your own PC):
@@ -138,27 +127,8 @@
       <li>Open Settings → General → VPN &amp; Device Management and install it.</li>
       <li>Then open General → About → Certificate Trust Settings and enable full trust for “mousee local root CA”.</li>
     </ol>
-  </details>
-</section>
-
-<!-- 2. PHONE-ROLL CALIBRATION ------------------------------------------ -->
-<section id="gammaCalib" class="screen pad">
-  <div class="topbar">
-    <h2 style="margin:0; flex:1;">Phone-roll calibration</h2>
-    <button id="gammaCalibBack" class="iconbtn">Back</button>
-  </div>
-  <p class="sub" style="margin:18px 0;">Hold the phone in your usual aiming pose.
-    Keep its aim fixed and smoothly roll it left and right until the timer ends.</p>
-  <div class="card">
-    <div id="gammaCalibReadout" class="t" style="font-size:16px;">Ready</div>
-    <div class="d">Cursor movement is paused during calibration.</div>
-  </div>
-  <button id="gammaCalibStart" class="card reco" style="color:var(--text); text-align:center; font-weight:700;">
-    Start 2.5 second calibration
-  </button>
-  <button id="gammaCalibClear" class="card" style="color:var(--muted); text-align:center;">
-    Disable compensation
-  </button>
+  </detail
+  -->
 </section>
 
 <!-- 3. CALIBRATION ------------------------------------------------------- -->
@@ -198,11 +168,6 @@ const CFG = {
   HOLD_MS: 180,        // tap vs hold threshold
   MOVE_THRESH_PX: 8,   // hold vs swipe threshold
   SCROLL_STEP_PX: 18,  // finger px per one wheel tick
-  GAMMA_CALIB_MS: 2500,
-  GAMMA_MIN_SAMPLES: 30,
-  GAMMA_MIN_ENERGY: 8,
-  GAMMA_REGULARIZATION: 0.5,
-  GAMMA_MAX_COUPLING: 2,
 };
 
 // ----------------------------- state ---------------------------------
@@ -214,9 +179,25 @@ let mode = null;               // chosen mode, replayed on reconnect
 let reconnectTimer = null;
 let reconnectDelay = 250;      // grows on repeated failure, reset on success
 const orient = { alpha: null, beta: null, gamma: null };
+// DeviceMotion rates live in axes attached to the phone. Accumulate every
+// sample using its own timestamp and rotate X/Z through the current phone
+// orientation before the next WebSocket frame consumes it.
+let gyroDelta = null;
+let lastMotionAt = null;
+
+function resetGyroDelta() {
+  gyroDelta = null;
+  lastMotionAt = null;
+}
+
+function emptyGyroDelta() {
+  return {
+    alpha: 0, beta: 0, gamma: 0,
+    local_alpha: 0, local_beta: 0, local_gamma: 0,
+    sample_ms: 0,
+  };
+}
 const calibrated = {}; // corner -> raw Euler angles
-let gammaCalibration = null; // frozen {alphaCoupling, betaCoupling}
-let gammaCapture = null;
 
 // --------------------------- utilities -------------------------------
 const $ = (id) => document.getElementById(id);
@@ -241,12 +222,11 @@ function wsUrl() {
   return `${proto}//${location.hostname}:${port}`;
 }
 // The server keeps no state across sockets, so on every (re)connect we replay
-// the full session — mode, smoothing and calibrations — so a
+// the full session — mode, smoothing and absolute calibration — so a
 // dropped link (screen lock, browser backgrounded) restores silently.
 function replayState() {
   if (mode) send({ t: "mode", mode });
   sendSmoothing();
-  sendGammaCalibration();
   if (mode === "absolute") {
     send({ t: "reset_calib" });
     for (const c of CORNERS) {
@@ -321,6 +301,10 @@ async function requestSensors() {
       typeof DeviceOrientationEvent.requestPermission === "function") {
     reqs.push(DeviceOrientationEvent.requestPermission().catch(() => "denied"));
   }
+  if (typeof DeviceMotionEvent !== "undefined" &&
+      typeof DeviceMotionEvent.requestPermission === "function") {
+    reqs.push(DeviceMotionEvent.requestPermission().catch(() => "denied"));
+  }
   // Must be triggered synchronously from the tap; awaiting the result is fine.
   await Promise.all(reqs);
   attachSensors();
@@ -340,7 +324,45 @@ function attachSensors() {
     if (e.alpha != null) orient.alpha = e.alpha;
     if (e.beta != null) orient.beta = e.beta;
     if (e.gamma != null) orient.gamma = e.gamma;
-    captureGammaSample();
+  }, true);
+  window.addEventListener("devicemotion", (e) => {
+    const r = e.rotationRate;
+    if (r && r.alpha != null && r.beta != null && r.gamma != null) {
+      const now = performance.now();
+      let dt = lastMotionAt == null ? Number(e.interval) / 1000 : (now - lastMotionAt) / 1000;
+      lastMotionAt = now;
+
+      // Ignore the first/late sample instead of integrating a browser pause.
+      if (!Number.isFinite(dt) || dt <= 0 || dt > 0.05 ||
+          orient.beta == null || orient.gamma == null) return;
+
+      const beta = orient.beta * Math.PI / 180;
+      const gamma = orient.gamma * Math.PI / 180;
+      const sinG = Math.sin(gamma);
+      const cosG = Math.cos(gamma);
+      const cosB = Math.cos(beta);
+      const safeCosB = Math.sign(cosB || 1) * Math.max(Math.abs(cosB), 0.25);
+
+      // rotationRate uses the opposite positive direction from the Euler
+      // orientation deltas observed on iOS. Convert the device-local angular
+      // velocity (X=beta, Z=alpha) into unrolled Euler-like cursor axes.
+      const localAlpha = -r.alpha * dt;
+      const localBeta = -r.beta * dt;
+      const localGamma = -r.gamma * dt;
+      const alpha = (-sinG * localBeta + cosG * localAlpha) / safeCosB;
+      const betaDelta = cosG * localBeta + sinG * localAlpha;
+
+      if (gyroDelta == null) {
+        gyroDelta = emptyGyroDelta();
+      }
+      gyroDelta.alpha += alpha;
+      gyroDelta.beta += betaDelta;
+      gyroDelta.gamma += localGamma;
+      gyroDelta.local_alpha += localAlpha;
+      gyroDelta.local_beta += localBeta;
+      gyroDelta.local_gamma += localGamma;
+      gyroDelta.sample_ms += dt * 1000;
+    }
   }, true);
 }
 
@@ -353,6 +375,7 @@ connect();
 $("modeRelative").addEventListener("click", async () => {
   mode = "relative";
   await ensureSensors();
+  resetGyroDelta();
   send({ t: "mode", mode: "relative" });
   startControl();
 });
@@ -374,96 +397,6 @@ function sendSmoothing() {
 $("smoothing").addEventListener("input", (e) => {
   $("smoothingValue").textContent = `${e.target.value}%`;
   sendSmoothing();
-});
-
-// ---------------------- phone-roll calibration ----------------------
-function wrappedDelta(current, previous) {
-  let delta = current - previous;
-  while (delta > 180) delta -= 360;
-  while (delta < -180) delta += 360;
-  return delta;
-}
-function clamp(value, max) {
-  return Math.max(-max, Math.min(max, value));
-}
-function sendGammaCalibration() {
-  if (gammaCalibration) {
-    send({
-      t: "gamma_calib",
-      alpha_coupling: gammaCalibration.alphaCoupling,
-      beta_coupling: gammaCalibration.betaCoupling,
-    });
-  } else {
-    send({ t: "reset_gamma_calib" });
-  }
-}
-function refreshGammaCalibration() {
-  $("gammaCalibStatus").textContent = gammaCalibration
-    ? `Active · kα ${gammaCalibration.alphaCoupling.toFixed(2)} · kβ ${gammaCalibration.betaCoupling.toFixed(2)}`
-    : "Optional · compensation off";
-}
-function captureGammaSample() {
-  if (!gammaCapture || orient.alpha == null || orient.beta == null || orient.gamma == null) return;
-  const previous = gammaCapture.previous;
-  const current = { alpha: orient.alpha, beta: orient.beta, gamma: orient.gamma };
-  gammaCapture.previous = current;
-  if (!previous) return;
-  const da = wrappedDelta(current.alpha, previous.alpha);
-  const db = current.beta - previous.beta;
-  const dg = wrappedDelta(current.gamma, previous.gamma);
-  gammaCapture.samples += 1;
-  gammaCapture.gammaEnergy += dg * dg;
-  gammaCapture.alphaGamma += da * dg;
-  gammaCapture.betaGamma += db * dg;
-}
-function finishGammaCalibration() {
-  const capture = gammaCapture;
-  gammaCapture = null;
-  if (!capture || capture.samples < CFG.GAMMA_MIN_SAMPLES ||
-      capture.gammaEnergy < CFG.GAMMA_MIN_ENERGY) {
-    $("gammaCalibReadout").textContent = "Not enough roll — try a wider, smoother motion";
-    return;
-  }
-  const denominator = capture.gammaEnergy + CFG.GAMMA_REGULARIZATION;
-  gammaCalibration = {
-    alphaCoupling: clamp(capture.alphaGamma / denominator, CFG.GAMMA_MAX_COUPLING),
-    betaCoupling: clamp(capture.betaGamma / denominator, CFG.GAMMA_MAX_COUPLING),
-  };
-  sendGammaCalibration();
-  refreshGammaCalibration();
-  $("gammaCalibReadout").textContent =
-    `Done · kα ${gammaCalibration.alphaCoupling.toFixed(2)} · kβ ${gammaCalibration.betaCoupling.toFixed(2)}`;
-}
-function updateGammaCalibrationTimer() {
-  if (!gammaCapture) return;
-  const remaining = Math.max(0, gammaCapture.endsAt - performance.now());
-  $("gammaCalibReadout").textContent = `Roll left ↔ right · ${(remaining / 1000).toFixed(1)} s`;
-  if (remaining === 0) finishGammaCalibration();
-  else requestAnimationFrame(updateGammaCalibrationTimer);
-}
-$("gammaCalibOpen").addEventListener("click", async () => {
-  await ensureSensors();
-  $("gammaCalibReadout").textContent = "Ready";
-  show("gammaCalib");
-});
-$("gammaCalibBack").addEventListener("click", () => {
-  gammaCapture = null;
-  show("mode");
-});
-$("gammaCalibStart").addEventListener("click", () => {
-  gammaCapture = {
-    previous: null, samples: 0, gammaEnergy: 0,
-    alphaGamma: 0, betaGamma: 0,
-    endsAt: performance.now() + CFG.GAMMA_CALIB_MS,
-  };
-  requestAnimationFrame(updateGammaCalibrationTimer);
-});
-$("gammaCalibClear").addEventListener("click", () => {
-  gammaCapture = null;
-  gammaCalibration = null;
-  sendGammaCalibration();
-  refreshGammaCalibration();
-  $("gammaCalibReadout").textContent = "Compensation disabled";
 });
 
 // ------------------------ calibration screen -------------------------
@@ -615,12 +548,22 @@ control.addEventListener("touchcancel", endTouch, { passive: false });
 function streamLoop() {
   if (screen === "control" && connected && !suppressMove &&
       orient.alpha != null && orient.beta != null) {
+    const gyroFresh = lastMotionAt != null && performance.now() - lastMotionAt < 150;
+    // A display can refresh faster than DeviceMotion. Send a zero gyro frame
+    // between samples instead of briefly falling back to coupled Euler deltas.
+    const frameGyroDelta = mode === "relative" && gyroFresh
+      ? (gyroDelta ?? emptyGyroDelta()) : null;
+    gyroDelta = null;
     send({
       t: "move",
       beta: orient.beta,
       alpha: orient.alpha,
       gamma: orient.gamma ?? 0,
+      rotation_delta: frameGyroDelta,
     });
+  } else {
+    // Never replay motion collected while disconnected, scrolling or hidden.
+    gyroDelta = null;
   }
   requestAnimationFrame(streamLoop);
 }

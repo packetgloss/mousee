@@ -55,9 +55,6 @@ pub const TRACKING_GAP_MS: u64 = 250;
 /// Scale of the radial asinh compressor. Small movement stays nearly linear;
 /// large movement is compressed but remains unbounded, preserving fast flicks.
 pub const REL_COMPRESSION_SCALE_PX: f64 = 30.0;
-/// Frozen gamma coupling is clamped to keep a bad calibration recoverable.
-pub const GAMMA_CALIB_MAX_COUPLING: f64 = 2.0;
-
 /// 1€ adaptive low-pass parameters. At slow movement the filter matches the
 /// existing smoothing slider; speed raises the cutoff to avoid added latency.
 pub const ONE_EURO_BETA: f64 = 0.02;

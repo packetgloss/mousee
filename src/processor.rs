@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use crate::config;
 use crate::monitors::LayoutHandle;
 use crate::mouse::MouseCmd;
-use crate::protocol::{ClientMsg, Corner, Mode};
+use crate::protocol::{ClientMsg, Corner, Mode, RotationDelta};
 
 /// Computed calibration bounds derived from the 4 corners (SPEC §5.1).
 #[derive(Debug, Clone, Copy)]
@@ -111,7 +111,6 @@ pub struct Processor {
 
     mode: Mode,
     smoothing: f64,
-    gamma_coupling: Option<(f64, f64)>,
 
     // calibration
     calib: HashMap<Corner, (f64, f64)>, // corner -> (beta, alpha)
@@ -140,7 +139,6 @@ impl Processor {
             debug,
             mode: Mode::Relative, // air-mouse is the recommended default (SPEC §4.2)
             smoothing: config::DEFAULT_SMOOTHING,
-            gamma_coupling: None,
             calib: HashMap::new(),
             bounds: None,
             pos: (0.0, 0.0),
@@ -196,24 +194,6 @@ impl Processor {
                 self.smoothing = value.clamp(0.05, 0.95);
                 vec![]
             }
-            ClientMsg::GammaCalib {
-                alpha_coupling,
-                beta_coupling,
-            } => {
-                let max = config::GAMMA_CALIB_MAX_COUPLING;
-                self.gamma_coupling = Some((
-                    alpha_coupling.clamp(-max, max),
-                    beta_coupling.clamp(-max, max),
-                ));
-                let (ka, kb) = self.gamma_coupling.unwrap();
-                tracing::info!("gamma calibration -> k=({ka:.3},{kb:.3})");
-                vec![]
-            }
-            ClientMsg::ResetGammaCalib => {
-                self.gamma_coupling = None;
-                tracing::info!("gamma calibration reset");
-                vec![]
-            }
             ClientMsg::Calib {
                 point,
                 beta,
@@ -241,7 +221,12 @@ impl Processor {
                     vec![MouseCmd::Scroll(ticks)]
                 }
             }
-            ClientMsg::Move { beta, alpha, gamma } => self.on_move(beta, alpha, gamma),
+            ClientMsg::Move {
+                beta,
+                alpha,
+                gamma,
+                rotation_delta,
+            } => self.on_move(beta, alpha, gamma, rotation_delta),
         }
     }
 
@@ -280,13 +265,19 @@ impl Processor {
         );
     }
 
-    fn on_move(&mut self, beta: f64, alpha: f64, gamma: f64) -> Vec<MouseCmd> {
+    fn on_move(
+        &mut self,
+        beta: f64,
+        alpha: f64,
+        gamma: f64,
+        rotation_delta: Option<RotationDelta>,
+    ) -> Vec<MouseCmd> {
         if self.should_log("sensor") {
             tracing::debug!("sensor: alpha={alpha:.2} beta={beta:.2} gamma={gamma:.2}");
         }
         match self.mode {
             Mode::Absolute => self.absolute(beta, alpha),
-            Mode::Relative => self.relative(beta, alpha, gamma),
+            Mode::Relative => self.relative(beta, alpha, gamma, rotation_delta),
         }
     }
 
@@ -353,7 +344,13 @@ impl Processor {
     }
 
     // --- Relative (air-mouse) mode (SPEC §5.2) -----------------------------
-    fn relative(&mut self, beta: f64, alpha: f64, gamma: f64) -> Vec<MouseCmd> {
+    fn relative(
+        &mut self,
+        beta: f64,
+        alpha: f64,
+        gamma: f64,
+        rotation_delta: Option<RotationDelta>,
+    ) -> Vec<MouseCmd> {
         let now = Instant::now();
         // Need two samples to take a delta; first frame only primes the state.
         let (Some(prev_alpha), Some(prev_beta), Some(prev_gamma), Some(prev_at)) = (
@@ -389,16 +386,21 @@ impl Processor {
             return vec![];
         }
 
-        // Gamma compensation is learned only during a dedicated roll gesture,
-        // then frozen. Live aiming can never alter these coefficients.
-        let da = wrapped_delta(alpha, prev_alpha);
-        let db = beta - prev_beta;
-        let dg = wrapped_delta(gamma, prev_gamma);
-        let (ka, kb) = self.gamma_coupling.unwrap_or((0.0, 0.0));
-        let corrected = apply_gamma_correction(da, db, dg, (ka, kb));
+        let euler = (
+            wrapped_delta(alpha, prev_alpha),
+            beta - prev_beta,
+            wrapped_delta(gamma, prev_gamma),
+        );
+        // The browser integrates each DeviceMotion sample against its own
+        // timestamp and unrolls the phone-local axes before sending. Older
+        // clients (or denied motion permission) retain the Euler fallback.
+        let (input, source) = rotation_delta.map_or((euler, "euler"), |delta| {
+            ((delta.alpha, delta.beta, delta.gamma), "gyro_unrolled")
+        });
+        let (da, db, dg) = input;
         let shaped = (
-            config::REL_SIGN_X * shape(corrected.0, config::REL_SENSITIVITY_X),
-            config::REL_SIGN_Y * shape(corrected.1, config::REL_SENSITIVITY_Y),
+            config::REL_SIGN_X * shape(da, config::REL_SENSITIVITY_X),
+            config::REL_SIGN_Y * shape(db, config::REL_SENSITIVITY_Y),
         );
         let compressed = soft_compress_vector(shaped, config::REL_COMPRESSION_SCALE_PX);
 
@@ -432,9 +434,19 @@ impl Processor {
 
         if self.should_log("rel") {
             tracing::debug!(
-                "rel: raw_deg=({da:.2},{db:.2},{dg:.2}) corrected=({:.2},{:.2}) k=({ka:.2},{kb:.2}) shaped=({:.1},{:.1}) compressed=({:.1},{:.1}) cutoff_min={min_cutoff_hz:.1}Hz v=({:.1},{:.1}) pos=({},{})",
-                corrected.0,
-                corrected.1,
+                "rel: source={source} gyro_local_deg={} gyro_unrolled_deg={} sensor_ms={:.1} euler_deg=({:.2},{:.2},{:.2}) input_deg=({da:.2},{db:.2},{dg:.2}) shaped=({:.1},{:.1}) compressed=({:.1},{:.1}) cutoff_min={min_cutoff_hz:.1}Hz v=({:.1},{:.1}) pos=({},{})",
+                rotation_delta.map_or_else(
+                    || "none".to_string(),
+                    |d| format!("({:.2},{:.2},{:.2})", d.local_alpha, d.local_beta, d.local_gamma)
+                ),
+                rotation_delta.map_or_else(
+                    || "none".to_string(),
+                    |d| format!("({:.2},{:.2},{:.2})", d.alpha, d.beta, d.gamma)
+                ),
+                rotation_delta.map_or(0.0, |d| d.sample_ms),
+                euler.0,
+                euler.1,
+                euler.2,
                 shaped.0,
                 shaped.1,
                 compressed.0,
@@ -485,18 +497,6 @@ fn wrapped_delta(current: f64, previous: f64) -> f64 {
         delta += 360.0;
     }
     delta
-}
-
-fn apply_gamma_correction(
-    alpha_delta: f64,
-    beta_delta: f64,
-    gamma_delta: f64,
-    coupling: (f64, f64),
-) -> (f64, f64) {
-    (
-        alpha_delta - coupling.0 * gamma_delta,
-        beta_delta - coupling.1 * gamma_delta,
-    )
 }
 
 fn low_pass_alpha(cutoff_hz: f64, seconds: f64) -> f64 {
@@ -566,15 +566,5 @@ mod tests {
     fn angular_delta_handles_wraparound() {
         assert_eq!(wrapped_delta(1.0, 359.0), 2.0);
         assert_eq!(wrapped_delta(359.0, 1.0), -2.0);
-    }
-
-    #[test]
-    fn frozen_gamma_calibration_removes_only_calibrated_coupling() {
-        let corrected = apply_gamma_correction(-0.3, 0.8, 1.0, (-0.3, 0.2));
-        assert!(corrected.0.abs() < 1e-12);
-        assert!((corrected.1 - 0.6).abs() < 1e-12);
-
-        let aim_without_roll = apply_gamma_correction(0.7, -0.4, 0.0, (-0.3, 0.2));
-        assert_eq!(aim_without_roll, (0.7, -0.4));
     }
 }

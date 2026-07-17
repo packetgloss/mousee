@@ -107,10 +107,6 @@ entry (no administrator rights required).
 - **Absolute** — aim maps directly to the screen after a 4-corner calibration.
   Horizontal spans the whole virtual desktop; vertical is stretched over the real
   monitor under the pointer (no dead zones on mixed-height multi-monitor setups).
-- **Phone-roll calibration (optional)** — hold the usual aiming pose and roll
-  the phone left/right for 2.5 seconds. The resulting gamma coupling is frozen
-  for the session and replayed after reconnects; normal aiming never retrains it.
-
 Smoothing is always active in both modes. The phone slider shows the actual
 amount of smoothing: right is steadier, left is more responsive. Its default
 65% maps to the existing internal response of 0.35.
@@ -134,12 +130,12 @@ All knobs are explicit constants at the top of the files:
 - **Linux/Wayland:** input injection (`enigo`) is restricted under Wayland; X11
   works. Primary target is Windows. The tray (`tray-icon` + `tao`) is also best
   tested on Windows; disable with `--no-default-features` if it fails to build.
-- Relative mode uses raw `alpha`/`beta` unless the optional phone-roll
-  calibration is active. `gamma` is never learned from live aiming because
-  natural circular gestures correlate all three Euler angles. Large frame
-  deltas pass through a direction-preserving `asinh` compressor: normal aiming
-  stays controlled while a strong flick can still cross monitors. A 1€ filter
-  smooths the trajectory at low speed while allowing fast deliberate movement
-  through with less lag.
+- Relative mode integrates every `DeviceMotionEvent.rotationRate` sample using
+  its own timestamp, then uses the current beta/gamma orientation to rotate the
+  phone-local axes into stable horizontal/vertical cursor axes. Gamma changes
+  the coordinate transform but never moves or suppresses the cursor by itself.
+  Browsers without rotation-rate data fall back to orientation deltas. Large
+  frame deltas pass through a direction-preserving `asinh` compressor, followed
+  by a 1€ filter.
 - Absolute horizontal can still inherit compass/magnetometer drift and therefore
   needs calibration.
