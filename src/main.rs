@@ -1,10 +1,12 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 //! mousee — control your PC mouse from phone orientation sensors.
 //! One Rust binary (HTML client embedded), one TCP port for page + WebSocket.
 //!
-//! Release process model on Windows: the interactive launcher (this console)
-//! picks the interface, prints the QR, then spawns a detached, console-less
-//! background worker (`--background`) that runs the server + tray. Debug builds
-//! always stay in one foreground process so logs and Ctrl-C behave normally.
+//! Release workers on Windows use the GUI subsystem, so `--background` never
+//! creates a console. Interactive release launches create or attach a console
+//! for the QR and prompts. Debug builds always stay in one foreground process
+//! so logs and Ctrl-C behave normally.
 
 #[cfg(all(windows, feature = "tray"))]
 mod autostart;
@@ -83,26 +85,22 @@ fn use_background_worker(args: &Args) -> bool {
     !cfg!(debug_assertions) && !args.debug && !args.no_tray && !args.yes
 }
 
-/// Build the runtime, start the server, return the runtime + connection flag +
-/// the URL scheme that was actually achieved (TLS may have fallen back to HTTP).
-fn start_server(
-    args: &Args,
-    ip: Ipv4Addr,
-) -> Result<(tokio::runtime::Runtime, Arc<AtomicBool>, &'static str)> {
+/// Build the runtime, start the server, and return the runtime + connection flag.
+fn start_server(args: &Args, ip: Ipv4Addr) -> Result<(tokio::runtime::Runtime, Arc<AtomicBool>)> {
     let layout = monitors::LayoutHandle::detect();
     layout.current().log_summary();
     layout.spawn_watcher(); // pick up monitor hotplug at runtime (SPEC §6)
 
     let mouse_tx = mouse::spawn();
 
-    let (tls_cfg, scheme) = if args.no_tls {
-        (None, "http")
+    let tls_cfg = if args.no_tls {
+        None
     } else {
         match tls::server_config(ip) {
-            Ok(cfg) => (Some(cfg), "https"),
+            Ok(cfg) => Some(cfg),
             Err(e) => {
                 tracing::warn!("could not enable TLS ({e}); falling back to HTTP");
-                (None, "http")
+                None
             }
         }
     };
@@ -124,7 +122,7 @@ fn start_server(
         }
     });
 
-    Ok((rt, connected, scheme))
+    Ok((rt, connected))
 }
 
 /// The detached background worker: server + tray, no console, silent logs.
@@ -143,7 +141,7 @@ fn run_worker(args: Args) -> Result<()> {
     let ip = preferred
         .or_else(|| net::candidates().first().map(|candidate| candidate.ip))
         .unwrap_or(Ipv4Addr::LOCALHOST);
-    let (_rt, _connected, _scheme) = start_server(&args, ip)?;
+    let (_rt, _connected) = start_server(&args, ip)?;
 
     #[cfg(feature = "tray")]
     {
@@ -161,7 +159,7 @@ fn run_worker(args: Args) -> Result<()> {
 
 /// Foreground mode: keep the server in this console and wait for Ctrl-C.
 fn run_foreground(args: Args, ip: Ipv4Addr) -> Result<()> {
-    let (rt, _connected, _scheme) = start_server(&args, ip)?;
+    let (rt, _connected) = start_server(&args, ip)?;
     println!("  Running in the foreground. Press Ctrl-C to quit.\n");
     rt.block_on(async {
         let _ = tokio::signal::ctrl_c().await;
@@ -196,6 +194,14 @@ fn spawn_worker(args: &Args, ip: Ipv4Addr) -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    // A release binary is a GUI-subsystem executable to keep the autostart
+    // worker truly windowless. Attach to the invoking terminal when there is
+    // one; otherwise create the interactive console before Clap prints output.
+    #[cfg(all(windows, not(debug_assertions)))]
+    if !std::env::args_os().any(|arg| arg == "--background") {
+        instance::ensure_console();
+    }
+
     let args = Args::parse();
 
     // Detached background worker has no console, so it installs no log

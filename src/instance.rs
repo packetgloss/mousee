@@ -92,8 +92,22 @@ mod imp {
         }
     }
 
-    /// A worker started from the Windows Run registry inherits a console window
-    /// because mousee is a console executable. Hide it before doing any work.
+    /// Attach a release launcher to its caller's terminal or create one when
+    /// started from Explorer. Background workers never call this function.
+    #[cfg(not(debug_assertions))]
+    pub fn ensure_console() {
+        use windows_sys::Win32::System::Console::{
+            AllocConsole, AttachConsole, ATTACH_PARENT_PROCESS,
+        };
+        unsafe {
+            if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
+                let _ = AllocConsole();
+            }
+        }
+    }
+
+    /// Kept for a worker launched by an older Run entry. New release workers
+    /// use the GUI subsystem and arrive without a console.
     pub fn hide_console() {
         use windows_sys::Win32::System::Console::GetConsoleWindow;
         use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
@@ -115,6 +129,8 @@ mod imp {
     pub fn hide_console() {}
 }
 
+#[cfg(all(windows, not(debug_assertions)))]
+pub use imp::ensure_console;
 pub use imp::{acquire, hide_console};
 #[cfg(all(windows, feature = "tray"))]
 pub use imp::{is_running, warn_already_running};

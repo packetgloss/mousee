@@ -25,11 +25,9 @@ pub struct Candidate {
     pub ip: Ipv4Addr,
     pub kind: IfKind,
     pub score: i32,
-    pub recommended: bool,
 }
 
-/// Enumerate private IPv4 candidates, ranked best-first. The recommended one is
-/// marked and placed at the front.
+/// Enumerate private IPv4 candidates, ranked best-first.
 pub fn candidates() -> Vec<Candidate> {
     let mut list: Vec<Candidate> = Vec::new();
 
@@ -48,7 +46,6 @@ pub fn candidates() -> Vec<Candidate> {
                 ip: v4,
                 kind,
                 score,
-                recommended: false,
             });
         }
     }
@@ -61,9 +58,6 @@ pub fn candidates() -> Vec<Candidate> {
             .cmp(&a.score)
             .then(a.ip.octets().cmp(&b.ip.octets()))
     });
-    if let Some(first) = list.first_mut() {
-        first.recommended = true;
-    }
     list
 }
 

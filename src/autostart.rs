@@ -2,7 +2,7 @@
 
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use dialoguer::{theme::ColorfulTheme, Select};
@@ -63,28 +63,12 @@ fn is_enabled() -> Result<bool> {
     Ok(status == ERROR_SUCCESS && kind == REG_SZ && bytes > 2)
 }
 
-fn powershell_literal(value: &Path) -> String {
-    value.to_string_lossy().replace('\'', "''")
-}
-
-fn autostart_command(exe: &Path) -> String {
-    // Explorer starts executables from the Run key without creation flags. A
-    // console-subsystem binary therefore gets an empty console before main()
-    // can hide it, and closing that console terminates the tray worker. Let the
-    // built-in Windows launcher create the worker hidden from the outset.
-    format!(
-        "powershell.exe -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden \
-         -Command \"Start-Process -FilePath '{}' -ArgumentList '--background' \
-         -WindowStyle Hidden\"",
-        powershell_literal(exe)
-    )
-}
-
 fn enable() -> Result<()> {
     let exe = std::env::current_exe().context("locating mousee.exe")?;
     // --background auto-detects the current LAN address, so the Run entry
-    // remains valid when the network changes.
-    let command = autostart_command(&exe);
+    // remains valid when the network changes. Release workers use the GUI
+    // subsystem, so Windows creates no console for this direct Run entry.
+    let command = format!("\"{}\" --background", exe.display());
     let value = wide(command);
     let bytes = unsafe {
         std::slice::from_raw_parts(value.as_ptr().cast::<u8>(), value.len() * size_of::<u16>())
@@ -158,20 +142,4 @@ pub fn prompt() -> Result<()> {
         _ => println!("Autostart was not changed.\n"),
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::autostart_command;
-    use std::path::Path;
-
-    #[test]
-    fn autostart_launches_the_worker_hidden() {
-        let command = autostart_command(Path::new(r"C:\Users\O'Brien\mousee.exe"));
-
-        assert!(command.starts_with("powershell.exe "));
-        assert!(command.contains("-WindowStyle Hidden"));
-        assert!(command.contains("-ArgumentList '--background'"));
-        assert!(command.contains(r"-FilePath 'C:\Users\O''Brien\mousee.exe'"));
-    }
 }

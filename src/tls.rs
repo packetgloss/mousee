@@ -45,11 +45,6 @@ struct Pems {
     key: String,
 }
 
-struct CaPems {
-    cert: String,
-    key: String,
-}
-
 fn write_cache(path: &std::path::Path, contents: impl AsRef<[u8]>) -> Result<()> {
     fs::write(path, contents).with_context(|| format!("writing {}", path.display()))
 }
@@ -74,12 +69,12 @@ fn ca_params() -> Result<CertificateParams> {
 
 /// The root is never rotated automatically: once installed and trusted on an
 /// iPhone it remains the stable identity behind all future LAN-IP leaves.
-fn load_or_generate_ca(d: &std::path::Path) -> Result<CaPems> {
+fn load_or_generate_ca(d: &std::path::Path) -> Result<Pems> {
     let cert_path = d.join("ca-cert.pem");
     let key_path = d.join("ca-key.pem");
     match (cert_path.exists(), key_path.exists()) {
         (true, true) => {
-            return Ok(CaPems {
+            return Ok(Pems {
                 cert: fs::read_to_string(&cert_path)?,
                 key: fs::read_to_string(&key_path)?,
             });
@@ -98,7 +93,7 @@ fn load_or_generate_ca(d: &std::path::Path) -> Result<CaPems> {
     let cert = ca_params()?
         .self_signed(&key)
         .context("self-signing root CA")?;
-    let pems = CaPems {
+    let pems = Pems {
         cert: cert.pem(),
         key: key.serialize_pem(),
     };
@@ -167,7 +162,7 @@ fn load_or_generate_in(d: &std::path::Path, ip: Ipv4Addr) -> Result<Pems> {
     Ok(pems)
 }
 
-fn generate_leaf(ca: &CaPems, ips: &BTreeSet<Ipv4Addr>) -> Result<Pems> {
+fn generate_leaf(ca: &Pems, ips: &BTreeSet<Ipv4Addr>) -> Result<Pems> {
     let mut params = CertificateParams::new(Vec::<String>::new())
         .context("building server certificate params")?;
 

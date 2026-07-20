@@ -19,7 +19,7 @@ use tokio_tungstenite::WebSocketStream;
 use crate::monitors::LayoutHandle;
 use crate::mouse::MouseCmd;
 use crate::processor::Processor;
-use crate::protocol::ClientMsg;
+use crate::protocol::{Btn, ClientMsg};
 
 /// Embedded HTML client — the whole UI in one file (SPEC §13.1).
 const CLIENT_HTML: &str = include_str!("../client/index.html");
@@ -223,6 +223,7 @@ where
     tracing::info!("phone connected");
     ctx.connected.store(true, Ordering::Relaxed);
     let mut proc = Processor::new(ctx.layout.clone(), ctx.debug);
+    let mut held = [false; 2];
 
     while let Some(msg) = ws.next().await {
         let msg = match msg {
@@ -249,11 +250,39 @@ where
                 continue;
             }
         };
-        for cmd in proc.handle(parsed) {
+        track_held_buttons(&mut held, &parsed);
+        if let Some(cmd) = proc.handle(parsed) {
             // Drop on a closed channel rather than crash (soft degradation).
             let _ = ctx.mouse_tx.send(cmd);
         }
     }
+    for (down, button) in held.into_iter().zip([Btn::Left, Btn::Right]) {
+        if down {
+            let _ = ctx.mouse_tx.send(MouseCmd::Release(button));
+        }
+    }
     ctx.connected.store(false, Ordering::Relaxed);
     tracing::info!("phone disconnected");
+}
+
+fn track_held_buttons(held: &mut [bool; 2], msg: &ClientMsg) {
+    match msg {
+        ClientMsg::Down { button } => held[*button as usize] = true,
+        ClientMsg::Up { button } => held[*button as usize] = false,
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tracks_buttons_that_need_releasing_on_disconnect() {
+        let mut held = [false; 2];
+        track_held_buttons(&mut held, &ClientMsg::Down { button: Btn::Left });
+        track_held_buttons(&mut held, &ClientMsg::Down { button: Btn::Right });
+        track_held_buttons(&mut held, &ClientMsg::Up { button: Btn::Left });
+        assert_eq!(held, [false, true]);
+    }
 }

@@ -123,10 +123,8 @@ pub struct Processor {
     // relative mode state
     prev_alpha: Option<f64>,
     prev_beta: Option<f64>,
-    prev_gamma: Option<f64>,
     last_sample: Option<Instant>,
     delta_filter: OneEuro2D,
-    vel: (f64, f64),
 
     // throttled logging
     last_log: HashMap<&'static str, Instant>,
@@ -143,10 +141,8 @@ impl Processor {
             bounds: None,
             pos: (0.0, 0.0),
             has_pos: false,
-            vel: (0.0, 0.0),
             prev_alpha: None,
             prev_beta: None,
-            prev_gamma: None,
             last_sample: None,
             delta_filter: OneEuro2D::default(),
             last_log: HashMap::new(),
@@ -158,10 +154,8 @@ impl Processor {
     fn reset_tracking(&mut self) {
         self.prev_alpha = None;
         self.prev_beta = None;
-        self.prev_gamma = None;
         self.last_sample = None;
         self.delta_filter.reset();
-        self.vel = (0.0, 0.0);
         self.has_pos = false;
     }
 
@@ -182,17 +176,17 @@ impl Processor {
     }
 
     /// Handle one incoming message; returns mouse commands to enqueue.
-    pub fn handle(&mut self, msg: ClientMsg) -> Vec<MouseCmd> {
+    pub fn handle(&mut self, msg: ClientMsg) -> Option<MouseCmd> {
         match msg {
             ClientMsg::Mode { mode } => {
                 self.mode = mode;
                 self.reset_tracking();
                 tracing::info!("mode -> {mode:?}");
-                vec![]
+                None
             }
             ClientMsg::Smoothing { value } => {
                 self.smoothing = value.clamp(0.05, 0.95);
-                vec![]
+                None
             }
             ClientMsg::Calib {
                 point,
@@ -203,22 +197,22 @@ impl Processor {
                 self.calib.insert(point, (beta, alpha));
                 tracing::info!("calib {point:?}: alpha={alpha:.1} beta={beta:.1} gamma={gamma:.1}");
                 self.recompute_bounds();
-                vec![]
+                None
             }
             ClientMsg::ResetCalib => {
                 self.calib.clear();
                 self.bounds = None;
                 tracing::info!("calibration reset");
-                vec![]
+                None
             }
-            ClientMsg::Down { button } => vec![MouseCmd::Press(button)],
-            ClientMsg::Up { button } => vec![MouseCmd::Release(button)],
+            ClientMsg::Down { button } => Some(MouseCmd::Press(button)),
+            ClientMsg::Up { button } => Some(MouseCmd::Release(button)),
             ClientMsg::Scroll { dy } => {
                 let ticks = (dy.round() as i32) * config::SCROLL_SENSITIVITY * config::SCROLL_SIGN;
                 if ticks == 0 {
-                    vec![]
+                    None
                 } else {
-                    vec![MouseCmd::Scroll(ticks)]
+                    Some(MouseCmd::Scroll(ticks))
                 }
             }
             ClientMsg::Move { beta, alpha, gamma } => self.on_move(beta, alpha, gamma),
@@ -260,20 +254,20 @@ impl Processor {
         );
     }
 
-    fn on_move(&mut self, beta: f64, alpha: f64, gamma: f64) -> Vec<MouseCmd> {
+    fn on_move(&mut self, beta: f64, alpha: f64, gamma: f64) -> Option<MouseCmd> {
         if self.should_log("sensor") {
             tracing::debug!("sensor: alpha={alpha:.2} beta={beta:.2} gamma={gamma:.2}");
         }
         match self.mode {
             Mode::Absolute => self.absolute(beta, alpha),
-            Mode::Relative => self.relative(beta, alpha, gamma),
+            Mode::Relative => self.relative(beta, alpha),
         }
     }
 
     // --- Absolute (calibrated) mode (SPEC §5.1 + §6) -----------------------
-    fn absolute(&mut self, beta: f64, alpha: f64) -> Vec<MouseCmd> {
+    fn absolute(&mut self, beta: f64, alpha: f64) -> Option<MouseCmd> {
         let Some(b) = self.bounds else {
-            return vec![]; // not calibrated yet
+            return None; // not calibrated yet
         };
         // Snapshot the live layout for this frame (it may change under hotplug).
         let layout = self.layout.current();
@@ -291,7 +285,7 @@ impl Processor {
         let span_x = b.alpha_right - b.alpha_left;
         let span_y = b.max_beta - b.min_beta;
         if span_x.abs() < 1e-6 || span_y.abs() < 1e-6 {
-            return vec![];
+            return None;
         }
         let frac_x = (a - b.alpha_left) / span_x;
         let frac_y = (beta - b.min_beta) / span_y;
@@ -329,36 +323,30 @@ impl Processor {
             );
         }
 
-        vec![MouseCmd::MoveTo(out.0, out.1)]
+        Some(MouseCmd::MoveTo(out.0, out.1))
     }
 
     // --- Relative (air-mouse) mode (SPEC §5.2) -----------------------------
-    fn relative(&mut self, beta: f64, alpha: f64, gamma: f64) -> Vec<MouseCmd> {
+    fn relative(&mut self, beta: f64, alpha: f64) -> Option<MouseCmd> {
         let now = Instant::now();
         // Need two samples to take a delta; first frame only primes the state.
-        let (Some(prev_alpha), Some(prev_beta), Some(prev_gamma), Some(prev_at)) = (
-            self.prev_alpha,
-            self.prev_beta,
-            self.prev_gamma,
-            self.last_sample,
-        ) else {
+        let (Some(prev_alpha), Some(prev_beta), Some(prev_at)) =
+            (self.prev_alpha, self.prev_beta, self.last_sample)
+        else {
             self.prev_alpha = Some(alpha);
             self.prev_beta = Some(beta);
-            self.prev_gamma = Some(gamma);
             self.last_sample = Some(now);
-            return vec![];
+            return None;
         };
 
         let dt = now.duration_since(prev_at);
         self.prev_alpha = Some(alpha);
         self.prev_beta = Some(beta);
-        self.prev_gamma = Some(gamma);
         self.last_sample = Some(now);
 
         // A locked/backgrounded browser resumes with a large accumulated
         // orientation delta. Treat the first resumed sample as a new baseline.
         if dt >= Duration::from_millis(config::TRACKING_GAP_MS) {
-            self.vel = (0.0, 0.0);
             self.delta_filter.reset();
             if self.should_log("gap") {
                 tracing::debug!(
@@ -366,12 +354,11 @@ impl Processor {
                     dt.as_secs_f64() * 1000.0
                 );
             }
-            return vec![];
+            return None;
         }
 
         let da = wrapped_delta(alpha, prev_alpha);
         let db = beta - prev_beta;
-        let dg = wrapped_delta(gamma, prev_gamma);
         let shaped = (
             config::REL_SIGN_X * shape(da, config::REL_SENSITIVITY_X),
             config::REL_SIGN_Y * shape(db, config::REL_SENSITIVITY_Y),
@@ -382,7 +369,7 @@ impl Processor {
         // response, while fast deliberate input raises the cutoff automatically.
         let s = self.smoothing;
         let min_cutoff_hz = smoothing_to_cutoff(s);
-        self.vel = self.delta_filter.filter(compressed, dt, min_cutoff_hz);
+        let vel = self.delta_filter.filter(compressed, dt, min_cutoff_hz);
 
         let layout = self.layout.current();
         let (ox, oy, w, h) = (
@@ -401,26 +388,26 @@ impl Processor {
         let max_x = (ox + w - 1) as f64;
         let min_y = oy as f64;
         let max_y = (oy + h - 1) as f64;
-        self.pos.0 = (self.pos.0 + self.vel.0).clamp(min_x, max_x);
-        self.pos.1 = (self.pos.1 + self.vel.1).clamp(min_y, max_y);
+        self.pos.0 = (self.pos.0 + vel.0).clamp(min_x, max_x);
+        self.pos.1 = (self.pos.1 + vel.1).clamp(min_y, max_y);
 
         let out = (self.pos.0.round() as i32, self.pos.1.round() as i32);
 
         if self.should_log("rel") {
             tracing::debug!(
-                "rel: euler_deg=({da:.2},{db:.2},{dg:.2}) shaped=({:.1},{:.1}) compressed=({:.1},{:.1}) cutoff_min={min_cutoff_hz:.1}Hz v=({:.1},{:.1}) pos=({},{})",
+                "rel: euler_deg=({da:.2},{db:.2}) shaped=({:.1},{:.1}) compressed=({:.1},{:.1}) cutoff_min={min_cutoff_hz:.1}Hz v=({:.1},{:.1}) pos=({},{})",
                 shaped.0,
                 shaped.1,
                 compressed.0,
                 compressed.1,
-                self.vel.0,
-                self.vel.1,
+                vel.0,
+                vel.1,
                 out.0,
                 out.1
             );
         }
 
-        vec![MouseCmd::MoveTo(out.0, out.1)]
+        Some(MouseCmd::MoveTo(out.0, out.1))
     }
 }
 

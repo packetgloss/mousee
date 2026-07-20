@@ -164,7 +164,6 @@
 "use strict";
 // ======================= CLIENT TUNING (SPEC §8) =======================
 const CFG = {
-  DEFAULT_PORT: 8081,
   HOLD_MS: 180,        // tap vs hold threshold
   MOVE_THRESH_PX: 8,   // hold vs swipe threshold
   SCROLL_STEP_PX: 18,  // finger px per one wheel tick
@@ -200,8 +199,7 @@ function send(obj) {
 // back to the same host/port, no typing required.
 function wsUrl() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  const port = location.port || CFG.DEFAULT_PORT;
-  return `${proto}//${location.hostname}:${port}`;
+  return `${proto}//${location.host}`;
 }
 // The server keeps no state across sockets, so on every (re)connect we replay
 // the full session — mode, smoothing and absolute calibration — so a
@@ -278,21 +276,23 @@ window.addEventListener("online", reconnectNow);
 
 // ------------------- sensor permission (iOS gesture) -----------------
 async function requestSensors() {
-  if (typeof DeviceOrientationEvent !== "undefined" &&
-      typeof DeviceOrientationEvent.requestPermission === "function") {
-    await DeviceOrientationEvent.requestPermission().catch(() => "denied");
+  if (typeof DeviceOrientationEvent === "undefined") {
+    setStatus(false, "motion sensors unavailable");
+    return false;
+  }
+  if (typeof DeviceOrientationEvent.requestPermission === "function" &&
+      await DeviceOrientationEvent.requestPermission().catch(() => "denied") !== "granted") {
+    setStatus(false, "motion access denied");
+    return false;
   }
   attachSensors();
+  return true;
 }
-// Ask for orientation access exactly once, on the first mode tap (the iOS gesture).
-// iOS only prompts the first time; later calls resolve silently.
-let sensorsRequested = false;
+// Ask on the mode tap so iOS treats the request as a user gesture.
+let sensorsReady = false;
 async function ensureSensors() {
-  if (sensorsRequested) return;
-  sensorsRequested = true;
-  try {
-    await requestSensors(); // synchronously initiated inside the tap (iOS)
-  } catch (e) { /* ignore; some browsers grant without a prompt */ }
+  if (!sensorsReady) sensorsReady = await requestSensors();
+  return sensorsReady;
 }
 function attachSensors() {
   window.addEventListener("deviceorientation", (e) => {
@@ -309,14 +309,14 @@ connect();
 
 // --------------------------- mode screen -----------------------------
 $("modeRelative").addEventListener("click", async () => {
+  if (!await ensureSensors()) return;
   mode = "relative";
-  await ensureSensors();
   send({ t: "mode", mode: "relative" });
   startControl();
 });
 $("modeAbsolute").addEventListener("click", async () => {
+  if (!await ensureSensors()) return;
   mode = "absolute";
-  await ensureSensors();
   send({ t: "mode", mode: "absolute" });
   send({ t: "reset_calib" });
   for (const k in calibrated) delete calibrated[k];

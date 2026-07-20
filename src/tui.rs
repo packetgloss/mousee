@@ -32,7 +32,11 @@ pub fn choose_ip(forced: Option<Ipv4Addr>, non_interactive: bool) -> Result<Ipv4
         return Ok(recommended);
     }
 
-    let labels: Vec<String> = cands.iter().map(label).collect();
+    let labels: Vec<String> = cands
+        .iter()
+        .enumerate()
+        .map(|(i, candidate)| label(candidate, i == 0))
+        .collect();
     let pick = Select::with_theme(&ColorfulTheme::default())
         .with_prompt("Select network interface for your phone")
         .items(&labels)
@@ -49,8 +53,8 @@ pub fn choose_ip(forced: Option<Ipv4Addr>, non_interactive: bool) -> Result<Ipv4
     }
 }
 
-fn label(c: &Candidate) -> String {
-    let rec = if c.recommended { "  (recommended)" } else { "" };
+fn label(c: &Candidate, recommended: bool) -> String {
+    let rec = if recommended { "  (recommended)" } else { "" };
     format!("{:<15} {:<22} [{}]{}", c.ip, c.name, c.kind.tag(), rec)
 }
 
