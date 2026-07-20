@@ -53,13 +53,6 @@ local-certificate warning; the page then connects on its own (no address to
 type), and you just **pick a mode**. On iOS the first mode tap is what grants
 motion-sensor access.
 
-Safari's “visit this website” exception is temporary. For permanent local trust,
-expand **iPhone keeps showing certificate warnings?** on the mode screen,
-download the stable `mousee local root CA`, install it under **Settings → General
-→ VPN & Device Management**, then enable it under **General → About → Certificate
-Trust Settings**. Install this root only from your own PC. The CA remains stable
-when mousee renews an IP certificate or the LAN address changes.
-
 ### Flags
 
 | Flag | Effect |
