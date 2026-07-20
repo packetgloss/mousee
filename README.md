@@ -104,7 +104,9 @@ Build without it via `cargo build --release --no-default-features` (or run with
 On an interactive release launch, mousee also asks whether it should start when
 you sign in to Windows. The default is **No, not now**; you can permanently hide
 the question or add the current executable to the per-user Windows autostart
-entry (no administrator rights required).
+entry (no administrator rights required). Autostart launches the tray worker
+hidden from the outset: it does not leave an empty console window on the
+desktop, and the worker is not tied to a closeable console.
 
 ## Modes
 
